@@ -345,10 +345,10 @@ def reflect_completions(
         due_date_from_of = task_info.get('due_date_from_of')
 
         # Extract date from completed_at ISO timestamp (format: YYYY-MM-DDTHH:MM:SS.ffffff)
-        completed_date = None
-        if completed_at:
-            # Extract YYYY-MM-DD from ISO timestamp
-            completed_date = completed_at.split('T')[0] if 'T' in completed_at else completed_at[:10]
+        # Fall back to today's date if completed_at is missing from sync_state
+        if not completed_at:
+            completed_at = datetime.now().isoformat()
+        completed_date = completed_at.split('T')[0] if 'T' in completed_at else completed_at[:10]
 
         # Remove hash from task name to get original name
         original_name = of_task_name
@@ -480,7 +480,14 @@ def main():
         try:
             with open(args.completed_tasks, 'r') as f:
                 data = json.load(f)
+            # Accept multiple formats:
+            #   {"completed_tasks": ["Task (hash)", ...]}
+            #   [{"name": "Task (hash)", ...}, ...]
+            #   ["Task (hash)", ...]
+            if isinstance(data, dict):
                 completed_task_names = data.get('completed_tasks', [])
+            elif isinstance(data, list):
+                completed_task_names = data
         except Exception as e:
             print(f"Error reading completed tasks file: {e}")
             return

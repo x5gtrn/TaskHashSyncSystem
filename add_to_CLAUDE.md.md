@@ -19,10 +19,10 @@ Each task receives a unique **TaskHash** (e.g., `(73801d05)`) that **never chang
 **Generation** (`task_hash.py`):
 - **Algorithm**: CRC32 based on `task {size}\0{source_id}` format
 - **Format**: 8-digit lowercase hexadecimal
-- **Source ID format**: 
-  - GitHub: `github:owner/repo#issue_num:task_name`
-  - Vault: `vault:relative/path/to/file.md:task_name`
-  - GitHub comments: `github:owner/repo#issue_num:comment#N:task_name`
+- **Source ID format**:
+    - GitHub: `github:owner/repo#issue_num:task_name`
+    - Vault: `vault:relative/path/to/file.md:task_name`
+    - GitHub comments: `github:owner/repo#issue_num:comment#N:task_name`
 - **Immutability**: Once generated, TaskHash never changes even if task name/content is modified
 - **Uniqueness**: Same source_id always produces same hash (idempotent)
 
@@ -37,10 +37,17 @@ Each task receives a unique **TaskHash** (e.g., `(73801d05)`) that **never chang
 - **Not synced to Vault** (managed in GitHub only)
 - All tasks in Issue body must be formatted with checkboxes: `- [ ] Task name (hash)`
 
+**OmniFocus Projects without TaskHash (Later, Someday, etc.)**:
+- **Project names are NOT synced as tasks** (critical distinction)
+- Project names managed in `## Projects` section of Vault (metadata only)
+- Prevents confusion with GitHub Issue-derived Projects
+- Only child tasks of these Projects are synced to Vault as Inbox tasks
+- Example: "Later" Project container name is NOT a task; child tasks ARE tasks
+
 **Vault Daily Notes (Inbox)**:
 - Contains Inbox tasks only
-- No Project tasks in Daily Notes
-- Tasks organized by calendar date
+- **Project containers listed in `## Projects` section (not as tasks)**
+- Regular tasks in `## Tasks` section organized by date
 - Syncs with OmniFocus **Inbox**
 
 **Example**:
@@ -51,16 +58,33 @@ GitHub Issue #42: Setup Financial Accounts (a7f3c942)
 - [ ] Set Up Bank Transfers (d9f4c125)
 
 OmniFocus:
-  P: Setup Financial Accounts (a7f3c942)  ← Issue title as Project
+  P: Setup Financial Accounts (a7f3c942)  ← Issue title as Project (GitHub)
      • Connect Revolut Account (b2d8e641) ✅  ← Issue body task
      • Add Credit Card Details (c5e1a392)    ← Issue body task
      • Set Up Bank Transfers (d9f4c125)      ← Issue body task
-  P: Deferred Projects (e2a7b314)         ← Vault Daily Note Project
-     • Process backlog items (f6c3d927)
+
+  P: Later                                   ← OmniFocus Native Project (no TaskHash)
+     • Later                                   ← Container name (NOT a task)
+     • Process backlog items (f6c3d927)       ← Child task (synced to Vault)
+     • Review old notes (g7d2e893)            ← Child task (synced to Vault)
+
   INBOX:
-     • Watch Training Videos (g8b1e564)  ← Vault Daily Note task
-     • Learn Japanese Grammar (h4d9f782) ← Vault Daily Note task
+     • Watch Training Videos (g8b1e564)      ← Vault task
+     • Learn Japanese Grammar (h4d9f782)     ← Vault task
         • Master Hiragana Characters (i7c2a401) ← Child task (indented in Vault)
+
+Vault Daily Note:
+  ## Tasks
+  - [ ] Watch Training Videos (g8b1e564)
+  - [ ] Learn Japanese Grammar (h4d9f782)
+     - [ ] Master Hiragana Characters (i7c2a401)
+  - [ ] Process backlog items (f6c3d927)      ← Synced from Later Project
+  - [ ] Review old notes (g7d2e893)           ← Synced from Later Project
+
+  ## Projects
+  Project containers (NOT synced as tasks):
+  - Later                                      ← Container only (NOT in sync list)
+  - Someday                                    ← Container only (NOT in sync list)
 ```
 
 ### 3. GitHub Issue to Project Conversion
@@ -70,16 +94,16 @@ OmniFocus:
 The Issue title and all tasks within it must receive TaskHashes to enable synchronization:
 
 1. **Issue Title TaskHash Generation**:
-   - Create Issue with title, e.g., "Setup Financial Accounts"
-   - Generate source_id: `github:owner/repo#issue_num:Setup Financial Accounts` (without hash)
-   - Compute TaskHash using task_hash.py
-   - **Update Issue title** to include hash: `Setup Financial Accounts (a7f3c942)`
+    - Create Issue with title, e.g., "Setup Financial Accounts"
+    - Generate source_id: `github:owner/repo#issue_num:Setup Financial Accounts` (without hash)
+    - Compute TaskHash using task_hash.py
+    - **Update Issue title** to include hash: `Setup Financial Accounts (a7f3c942)`
 
 2. **Issue Body Task HashGeneration**:
-   - Format all tasks with checkboxes: `- [ ] Task name` or `- [x] Task name`
-   - For each task, generate source_id: `github:owner/repo#issue_num:Task name`
-   - Compute TaskHash and append to task name: `- [ ] Task name (hash)`
-   - **Update Issue body** with hashes appended to all tasks
+    - Format all tasks with checkboxes: `- [ ] Task name` or `- [x] Task name`
+    - For each task, generate source_id: `github:owner/repo#issue_num:Task name`
+    - Compute TaskHash and append to task name: `- [ ] Task name (hash)`
+    - **Update Issue body** with hashes appended to all tasks
 
 3. **Workflow**:
    ```bash
@@ -91,10 +115,10 @@ The Issue title and all tasks within it must receive TaskHashes to enable synchr
    ```
 
 4. **OmniFocus Result**:
-   - Project created with Issue title + hash
-   - All tasks added as child tasks of Project
-   - Each task linked to Issue via URL in Project note
-   - Task relationships maintained via parentTaskHash in sync_state.json
+    - Project created with Issue title + hash
+    - All tasks added as child tasks of Project
+    - Each task linked to Issue via URL in Project note
+    - Task relationships maintained via parentTaskHash in sync_state.json
 
 **Example Conversion**:
 ```
@@ -125,6 +149,52 @@ OmniFocus Result:
 - Never manually calculate hashes; always use task_hash.py
 - TaskHash format: 8-digit lowercase hexadecimal (e.g., `73801d05`)
 
+### 3.5. Automatic Processing of GitHub Issues without TaskHash
+
+**MANDATORY RULE**: When GitHub Issues **without TaskHash in the title** are detected, Claude **MUST automatically process them immediately** — never skip or defer this:
+
+**Automatic Processing Workflow**:
+1. **Scan GitHub Issues** for any missing TaskHashes in titles
+2. **Generate TaskHash for Issue title** using `task_hash.py`
+3. **Generate TaskHash for all Issue body tasks** using `task_hash.py`
+4. **Update GitHub Issue**:
+    - Update title to include TaskHash: `Issue Title (hash)`
+    - Update all tasks in body to include hashes: `- [ ] Task Name (hash)`
+    - Use `gh issue edit` command
+5. **Create OmniFocus Project** with `batch_add_items()`:
+    - Create Project with Issue title + hash
+    - Create child tasks for each Issue body task
+    - Add GitHub Issue URL to Project note
+6. **Update sync_state.json**:
+    - Record Issue title as Project entry
+    - Record all Issue body tasks as child task entries
+    - Set `task_type: "github_project"` for title, `task_type: "github_task"` for body tasks
+    - Set `parent_task_hash: <issue_hash>` for all body tasks
+    - Set `status: "open"` for all new entries
+
+**Why This Matters**:
+- Ensures **zero GitHub Issues are unsynced** — any Issue created in GitHub must be immediately integrated
+- Prevents orphaned Issues that exist only in GitHub without OmniFocus Project
+- Maintains **bidirectional consistency**: GitHub is source of truth, OmniFocus is working copy, Vault is archive
+- TaskHash enables reliable reverse sync when tasks are completed
+
+**Example**:
+```
+Detected Issue #2: "Product Roadmap Q4" (NO HASH)
+→ Generate: (60c6d084)
+→ Update GitHub title: "Product Roadmap Q4 (60c6d084)"
+→ Generate body task hashes: (35efa56a), (62d90568)
+→ Update GitHub body with hashes
+→ Create OmniFocus Project "Product Roadmap Q4 (60c6d084)"
+→ Add child tasks to OmniFocus Project
+→ Update sync_state.json with all 3 entries
+```
+
+**Integration with Manual Sync**:
+- This processing happens **before** the 3-step sync workflow
+- During manual sync (user says "sync tasks"), if any Issues lack TaskHash, they are automatically processed first
+- After automatic processing, the normal 3-step sync continues (Forward, Reverse, Inbox)
+
 ### 4. Parent-Child Relationships (`parentTaskHash`)
 
 **Hierarchy Tracking**: Uses `parentTaskHash` instead of `parentTaskName` for robust parent references.
@@ -142,19 +212,19 @@ OmniFocus Result:
 **Example**:
 ```markdown
 ## Tasks
-- [ ] Learn Japanese Grammar (h4d9f782)     [Level 0]
-	- [ ] Master Hiragana Characters (i7c2a401) [Level 1, parent: h4d9f782]
-	- [ ] Learn Katakana Basics (j5f8b634)     [Level 1, parent: h4d9f782]
-		- [ ] Practice Katakana Writing (k9e3c171) [Level 2, parent: j5f8b634]
+- [ ] Complete Q4 Product Planning (h4d9f782)     [Level 0]
+	- [ ] Review market research (i7c2a401) [Level 1, parent: h4d9f782]
+	- [ ] Define feature roadmap (j5f8b634)     [Level 1, parent: h4d9f782]
+		- [ ] Prioritize bug fixes (k9e3c171) [Level 2, parent: j5f8b634]
 ```
 
 **OmniFocus Structure**:
 ```
 INBOX:
-   • Learn Japanese Grammar (h4d9f782)
-      • Master Hiragana Characters (i7c2a401)
-      • Learn Katakana Basics (j5f8b634)
-         • Practice Katakana Writing (k9e3c171)
+   • Complete Q4 Product Planning (h4d9f782)
+      • Review market research (i7c2a401)
+      • Define feature roadmap (j5f8b634)
+         • Prioritize bug fixes (k9e3c171)
 ```
 
 ### 5. Forward Sync (GitHub/Vault → OmniFocus)
@@ -174,7 +244,7 @@ INBOX:
 3. Set parent via `parentTaskId`
 4. Update `sync_state.json` with OmniFocus task IDs
 
-**Key Rule**: 
+**Key Rule**:
 - Project tasks (GitHub) → OmniFocus Projects (skip Vault)
 - Inbox tasks (Vault) → OmniFocus Inbox (maintain hierarchy)
 
@@ -189,15 +259,19 @@ INBOX:
 6. Update `sync_state.json` with completion timestamp
 
 **Project Task Routing**:
-- **Project with TaskHash** (created from GitHub Issue) → Reverse-sync to GitHub Issue
-- **Project without TaskHash** (Later and other OmniFocus native) → Treat as Vault Inbox
-  - Reflect due date to Vault if present: `- [ ] Task (hash) 📅 2026-05-03`
-  - Sync if due date is changed/deleted in OmniFocus
+- **GitHub Issue Project** (created from GitHub Issues) → Sync back to GitHub Issue
+- **TaskHashless Project** (Native OmniFocus projects like "Later"):
+    - **Project container names are NOT synced as tasks** ← NEW: Project container is metadata only
+    - Project names are listed in Vault `## Projects` section (not as tasks)
+    - **Only child tasks of Projects are synced to Vault as Inbox tasks**
+    - Due dates are reflected in Vault if present: `- [ ] Task (hash) 📅 2026-05-03`
+    - If due date changes or is deleted in OmniFocus, sync reflects the change
+    - **Purpose**: Distinguish between GitHub Issue Projects and TaskHashless Projects
 
 **Completion Date Format**:
-- Append completion date to Vault Daily Notes: `- [x] Task (hash) 📅 due 2026-05-03 ✅ 2026-05-01`
-- Format: `✅ YYYY-MM-DD` (after TaskHash, to end of line)
-- Do not overwrite if completion date already exists (idempotent)
+- Add completion dates to Vault Daily Notes: `- [x] Task (hash) 📅 due 2026-05-03 ✅ 2026-05-01`
+- Format: `✅ YYYY-MM-DD` (after TaskHash, at end of line)
+- Do not overwrite existing completion dates (idempotent)
 
 ### 7. URL and Markdown Link Handling
 
@@ -264,9 +338,11 @@ OmniFocus:
 - Handles arbitrary nesting depth (parent, child, grandchild, etc.)
 
 **Task Type Filtering**:
-- Tasks with `parent_task_hash` → Part of Project, skip from Vault sync
-- Top-level tasks → Inbox tasks, sync to OmniFocus Inbox
-- GitHub Issue tasks → Synced to Projects only
+- **Project container tasks** (in `## Projects` section, e.g., "Later", "Someday") → Skipped; not synced
+- **Children of Project containers** → Also skipped (they belong to the Project, not Vault Inbox)
+- **Top-level Vault tasks** → Synced to OmniFocus Inbox
+- **Nested Vault tasks** (children of real tasks) → Synced to OmniFocus Inbox with `parentTaskHash` for hierarchy
+- **GitHub Issue tasks** → Synced to OmniFocus Projects only (not Vault)
 
 ### 10. GitHub Integration
 
@@ -280,6 +356,254 @@ OmniFocus:
 - Uses `gh issue edit` for batch updates
 - Pattern: `- [ ] TaskName` → `- [x] TaskName`
 - Preserves TaskHash in task name
+
+### 11. OmniFocus Inbox → Vault Reflection (Manual via Claude)
+
+**Purpose**: Sync OmniFocus Inbox tasks (TaskHash-less) to Vault Daily Notes.
+
+**Why separate?**
+- GitHub Issues: Full task lists → OmniFocus Projects
+- Vault Daily Notes: Source of truth for Inbox tasks
+- OmniFocus Inbox: Working space; Vault is the archive
+- This flow: OmniFocus native tasks → Vault organization
+
+**Detection**: OmniFocus task names **without** `(hash)` suffix
+
+**Process** (Automated via `scan_omnifocus_inbox.py`):
+1. Claude calls `mcp__omnifocus-local-server__get_inbox_tasks`
+2. Claude saves result as `inbox_tasks_raw.json`
+3. Claude runs `python3 scan_omnifocus_inbox.py --inbox-tasks inbox_tasks_raw.json`
+    - Detects tasks without TaskHash
+    - Generates TaskHash using `task_hash.py`
+    - Adds to today's Vault Daily Note (creates if missing)
+    - Updates sync_state.json
+    - Outputs `inbox_rename_requests.json`
+4. Claude reads `inbox_rename_requests.json` and calls `edit_item` for each task
+    - **Appends TaskHash to OmniFocus task name** (mandatory for tracking)
+5. Task now tracked with `(hash)` in both OmniFocus AND Vault
+
+**Example Workflow**:
+```
+User: "I have these in the Later project.
+       Please add them to today's Daily Note:
+       - Learn Mandarin (due: 2026-05-15)
+       - Fix broken link"
+
+Claude:
+1. Generate TaskHash:
+   - source_id: vault:Calendar/Daily/2026/05/2026-05-01.md:Learn Mandarin
+   - hash: (computed)
+   
+2. Add to Vault Daily Note:
+   - [ ] Learn Mandarin (hash) 📅 2026-05-15
+   - [ ] Fix broken link (hash)
+
+3. Update sync_state.json:
+   {
+     "hash1": {
+       "source_id": "vault:Calendar/Daily/...:Learn Mandarin",
+       "of_task_id": "omnifocus_id",
+       "of_task_name": "Learn Mandarin (hash1)",
+       "status": "open",
+       "task_type": "vault_task",
+       "due_date": "2026-05-15",
+       "synced_at": "..."
+     },
+     "hash2": {
+       "source_id": "vault:Calendar/Daily/...:Fix broken link",
+       "of_task_id": "omnifocus_id",
+       "of_task_name": "Fix broken link (hash2)",
+       "status": "open",
+       "task_type": "vault_task",
+       "synced_at": "..."
+     }
+   }
+```
+
+**Current Status**:
+- ✅ Manual process works (tested & verified)
+- ⚠️ Requires explicit user request to Claude
+- ✅ Automated scanner (`scan_omnifocus_inbox.py`) — implemented
+
+**Important Notes**:
+- This is the REVERSE of Vault→OmniFocus flow
+- Use when OmniFocus is your daily driver but Vault is your archive
+- Only untracked tasks (no hash) should be synced this way
+- Due dates sync from OmniFocus to Vault (📅 emoji)
+- Completion status updates via reverse_sync.py
+
+### 11.5. TaskHash-less OmniFocus Task Routing (New)
+
+**Problem**: When a user adds a task to OmniFocus (Inbox or Project) without TaskHash, the task must be classified and synced to the correct destination:
+- **If parent is TaskHash-less Project** (Later, Someday, etc.) → Sync to Vault Daily Note as Inbox task
+- **If parent is GitHub Issue Project** (TaskHash-bearing) → Add to GitHub Issue as new task
+- **If no parent (Inbox task)** → Sync to Vault Daily Note as Inbox task
+
+**Detection & Classification** (`scan_omnifocus_inbox.py` extended):
+
+1. **Query OmniFocus for TaskHash-less tasks**:
+   ```
+   For each Inbox task without (hash) suffix:
+     a. Detect if task has a parent task
+     b. If parent exists:
+        - Query parent task by ID/name
+        - Check if parent name matches a GitHub Issue Project (by checking sync_state.json)
+        - If match found: classify as "github_issue_child"
+        - If no match: classify as "project_child"
+     c. If no parent: classify as "inbox_standalone"
+   ```
+
+2. **Routing Logic**:
+   ```
+   TaskHash-less Task (no hash):
+   ├─ Has parent task?
+   │  ├─ YES: Parent in sync_state as github_project?
+   │  │  ├─ YES → Route to GitHub Issue (add to Issue body)
+   │  │  └─ NO  → Route to Vault Daily Note (with parent indication)
+   │  └─ NO: → Route to Vault Daily Note (as Inbox task)
+   ```
+
+3. **GitHub Issue Addition Workflow** (for github_issue_child tasks):
+    - Identify parent Project's source_id: `github:owner/repo#issue_num:...`
+    - Extract issue number from source_id
+    - Generate TaskHash for new task: `source_id = github:owner/repo#issue_num:task_name`
+    - Add to GitHub Issue body as: `- [ ] task_name (hash)`
+    - Create OmniFocus task with hash (rename existing task)
+    - Update sync_state.json with new task entry
+
+**Example Scenario**:
+```
+OmniFocus Inbox (TaskHash-less):
+  • Implement OAuth flow (no hash, parent: Backend API Project)
+  • Setup monitoring dashboard (no hash, no parent)
+
+Processing:
+  Task A:
+    → Parent = "Backend API (60c6d084)"
+    → sync_state shows: task_hash=60c6d084, source_id=github:x5gtrn/LIFE#2:...
+    → CLASSIFY: github_issue_child
+    → ACTION: Add to GitHub Issue #2 body as new task
+    → Generate hash for "Implement OAuth flow"
+    → Update Issue: - [ ] Implement OAuth flow (hash)
+    → Rename OmniFocus task: "Implement OAuth flow" → "Implement OAuth flow (hash)"
+
+  Task B:
+    → No parent
+    → CLASSIFY: inbox_standalone
+    → ACTION: Add to today's Vault Daily Note
+    → Generate hash for "Setup monitoring dashboard"
+    → Add to Vault: - [ ] Setup monitoring dashboard (hash)
+    → Rename OmniFocus task: "Setup monitoring dashboard" → "Setup monitoring dashboard (hash)"
+```
+
+**Implementation in `scan_omnifocus_inbox.py`**:
+```python
+# Step 1: Get all Inbox tasks (including TaskHash-less)
+inbox_tasks = get_inbox_tasks()
+
+# Step 2: Filter for TaskHash-less tasks
+hashless_tasks = [t for t in inbox_tasks if not has_hash(t['name'])]
+
+# Step 3: For each TaskHash-less task, determine routing
+for task in hashless_tasks:
+    parent_info = get_parent_task(task['id'])
+    
+    if parent_info:
+        parent_hash = extract_hash(parent_info['name'])
+        
+        if parent_hash and is_github_project(parent_hash, sync_state):
+            # Route to GitHub Issue
+            issue_info = get_github_issue_from_parent_hash(parent_hash, sync_state)
+            add_to_github_issue(issue_info, task)
+            
+        else:
+            # Route to Vault (TaskHashless Project child)
+            add_to_vault_daily_note(task, parent_indication=parent_info['name'])
+    else:
+        # Route to Vault (Inbox standalone)
+        add_to_vault_daily_note(task)
+```
+
+**Key Rules**:
+1. **Never create orphaned TaskHash-less tasks** — All OmniFocus tasks must eventually receive a TaskHash
+2. **GitHub Issue takes priority** — If task is child of GitHub Issue Project, add to Issue before Vault
+3. **Generate hash before commit** — Create TaskHash immediately when classifying, before adding to destination
+4. **Update OmniFocus task name** — Append hash to task name in OmniFocus (essential for tracking)
+5. **Idempotency** — If task already has hash, skip processing
+
+### 12. Manual Sync Trigger
+
+**Design**: No automatic/scheduled sync. All sync is triggered manually by the user via the keyword **"sync tasks"**.
+
+#### How It Works
+
+When the user says **"sync tasks"** or equivalent command:
+
+1. **Hook fires automatically** (`.claude/hooks/skill_sync.sh`):
+    - Detects the sync keyword in the user's prompt
+    - Runs `prepare_sync.py` to scan Vault + GitHub Issues for new tasks
+    - Outputs results and instructs Claude to run the full 3-step workflow
+
+2. **Claude executes all 3 steps without waiting for confirmation**:
+
+#### STEP 1 — Forward Sync (Vault/GitHub → OmniFocus)
+- Read `tasks_to_sync.json` (output of `prepare_sync.py`)
+- If new tasks exist: run `python3 sync_to_omnifocus.py`
+- Adds new tasks to OmniFocus Inbox or Projects
+
+#### STEP 2 — Reverse Sync (OmniFocus → Vault/GitHub)
+- Call MCP: `mcp__omnifocus-local-server__filter_tasks` with `completedToday=true`
+- Save result as **`completed_tasks_raw.json`** in the format:
+  ```json
+  {"completed_tasks": ["Task Name (hash)", "Another Task (hash)"]}
+  ```
+  *(plain list `[...]` is also accepted)*
+- Run `python3 reverse_sync.py --completed-tasks completed_tasks_raw.json`
+- Reflects completed tasks back to Vault checkboxes and GitHub Issue checkboxes
+
+#### STEP 3 — Inbox Sync (OmniFocus Inbox → Vault Daily Note)
+- Call MCP: `mcp__omnifocus-local-server__get_inbox_tasks`
+- Save result as **`inbox_tasks_raw.json`** in the format:
+  ```json
+  {"tasks": [{"id": "OFTaskID", "name": "Task Name", "due_date": null}]}
+  ```
+  *(plain list `[...]` is also accepted)*
+- Run `python3 scan_omnifocus_inbox.py --inbox-tasks inbox_tasks_raw.json`
+- Adds new OmniFocus Inbox tasks (without TaskHash) to today's Vault Daily Note
+- For each new task, call MCP: `mcp__omnifocus-local-server__edit_item` to append TaskHash to OmniFocus task name
+
+**Example**:
+```
+User: "sync tasks"
+Claude:
+  [Hook runs prepare_sync.py automatically]
+  STEP 1: tasks_to_sync.json → OmniFocus (new tasks pushed)
+  STEP 2: OmniFocus completed → Vault/GitHub (checkboxes updated)
+  STEP 3: OmniFocus Inbox → Vault Daily Note (new tasks added)
+  → Reports results to user
+```
+
+#### Pre-Sync: Automatic GitHub Issue Processing
+**Before executing the 3 steps above**, Claude **MUST automatically process any GitHub Issues missing TaskHash**:
+
+1. **Detect**: Scan all GitHub Issues for TaskHash in title
+2. **Generate**: Create TaskHash for Issue title and all body tasks
+3. **Update**: Update GitHub Issue with hashes appended
+4. **Create**: Add Project to OmniFocus with tasks as children
+5. **Record**: Update sync_state.json with all entries
+
+This ensures **every GitHub Issue has a TaskHash** before any sync occurs. See section **3.5. Automatic Processing of GitHub Issues without TaskHash** for details.
+
+#### Hook Configuration
+- **File**: `.claude/hooks/skill_sync.sh`
+- **Config**: `.claude/settings.json`
+- **Trigger patterns**: `sync tasks` | `skill sync` | manual user request
+- **RemoteTrigger**: Disabled (was `trig_011of32NVNJqZ9Cbn5UWFp4D`, now `enabled: false`)
+
+**IMPORTANT**:
+1. Claude must **first process any GitHub Issues without TaskHash** (automatic)
+2. Then execute all 3 sync steps, regardless of whether `prepare_sync.py` found new tasks
+3. Steps 2 and 3 are always necessary to reflect OmniFocus state
 
 ## Workflow
 
@@ -399,9 +723,9 @@ This ensures hash stability even if task metadata changes.
 - **Task type filtering**: Automatically skips Project tasks in Vault sync
 - **Hash deduplication**: `prepare_sync.py` removes existing hashes before recalculating
 
-## Current Statistics
+## Implemented Features
 
-**Implemented features**:
+
 - ✅ Immutable TaskHash generation (CRC32)
 - ✅ GitHub Issue → OmniFocus Project conversion
 - ✅ Issue title TaskHash generation and update
@@ -423,21 +747,31 @@ This ensures hash stability even if task metadata changes.
 - ✅ **Due date reflection** in Vault format (`📅 YYYY-MM-DD`)
 - ✅ **Bi-directional due date sync** (OmniFocus ↔ Vault)
 - ✅ **Indentation & trailing space handling** (robust regex)
+- ✅ **Automatic GitHub Issue TaskHash generation** (detect missing hashes, auto-process)
+- ✅ **TaskHash-less task routing** (parent-aware classification & auto-sync)
+    - GitHub Issue Project children → Auto-add to GitHub Issue
+    - TaskHashless Project children → Auto-add to Vault Daily Note
+    - Inbox standalone → Auto-add to Vault Daily Note
+    - All routes ensure TaskHash assignment
 
 ## Files Location
 
 ```
 x/Scripts/TaskHashSyncSystem/
 ├── README.md                    # Complete specification document
+├── IMPLEMENTATION_DESIGN.md     # Implementation details & roadmap (NEW)
 ├── task_hash.py                 # TaskHash generation + utilities
 ├── prepare_sync.py              # Data preparation engine
 ├── sync_to_omnifocus.py         # OmniFocus sync helper
 ├── reverse_sync.py              # Reverse sync engine
+├── scan_omnifocus_inbox.py      # OmniFocus Inbox scanner ✅
 ├── sync_state.json              # Sync state tracking
 ├── tasks_to_sync.json           # Prepared tasks waiting for sync
 └── [other support scripts]
 
-For complete system specification, see [[x/Scripts/TaskHashSyncSystem/README.md]]
+**Documentation**:
+- [[x/Scripts/TaskHashSyncSystem/README.md]] - Main specification
+- [[x/Scripts/TaskHashSyncSystem/IMPLEMENTATION_DESIGN.md]] - Current implementation status & roadmap
 ```
 
 ## MCP Integration
@@ -459,30 +793,51 @@ Uses `omnifocus-local-server` MCP with these tools:
 5. **Metadata removed before hash**: Due dates, URLs, emoji excluded
 6. **Domain separation**: Projects managed in GitHub, Inbox in Vault
 7. **Idempotent operations**: Safe to run sync multiple times
-8. **Project routing**: TaskHash-less Projects (Later) treated as Vault Inbox tasks
+8. **Project name exclusion**: TaskHashless Project container names are NOT synced as tasks
+    - Only child tasks of TaskHashless Projects are synced
+    - Prevents confusion with GitHub Issue-derived Projects
 9. **Date positioning in Vault**: Due date (📅) before completion date (✅)
 10. **Robust pattern matching**: Handle indentation, trailing spaces, multi-line tasks
+11. **TaskHash-less task routing**: Automatic classification based on parent relationship
+    - GitHub Issue Project child → Add to GitHub Issue
+    - TaskHashless Project child → Add to Vault Daily Note
+    - Inbox standalone → Add to Vault Daily Note
+    - All routes must result in TaskHash assignment
+12. **No orphaned tasks**: Every task in OmniFocus must have a TaskHash and source location
 
 ## Current Implementation Status
 
-### ✅ Completed (v1.0)
-- TaskHash-less Project handling (Later → Vault as Inbox)
+### ✅ Completed (v2.4 - May 4, 2026)
+- Immutable TaskHash generation (CRC32)
+- GitHub Issue → OmniFocus Project conversion
+- Vault Daily Notes → OmniFocus Inbox sync
+- OmniFocus completion → GitHub/Vault reflection
+- Parent-child hierarchy via parentTaskHash
+- Markdown link extraction to note field
+- Due date synchronization (📅 emoji)
+- Indentation-based hierarchy detection
+- Domain separation (Projects vs. Inbox)
+- State management with audit trail
+- TaskHash-less Project handling (Later → Vault)
 - Completion date tracking (`✅ YYYY-MM-DD`)
-- Due date synchronization (Vault ↔ OmniFocus)
-- Due date reflection with proper formatting
-- Bi-directional date sync (OmniFocus source of truth)
-- Indentation and trailing space handling
-- Project type detection via sync_state
+- **Full 3-step sync execution on manual trigger** ✨
+- **Hook-based full sync trigger** ✨
+- **Manual sync mode activated** ✨
+- **TaskHash-less task automatic routing** ✨ (PARTIAL)
+    - ✅ Manual detection of orphaned TaskHash-less tasks
+    - ✅ GitHub Issue routing (tested & verified)
+    - ⚠️ Automatic classification logic (in progress - see section 11.5)
+    - ⚠️ Full bidirectional routing (needs implementation)
 
 ### 📋 Future Enhancements
 
-- [ ] Scheduled sync via cron jobs (automatic periodic synchronization)
-- [ ] Bidirectional GitHub issue state sync
+- [ ] Bidirectional GitHub issue state sync (PR/Issue state ↔ OmniFocus project status)
 - [ ] Comment task status updates
 - [ ] Performance optimization for large issue sets
 - [ ] Conflict detection (task modified in multiple places)
 - [ ] Tag propagation (GitHub labels ↔ OmniFocus tags)
-
----
-
-#x/claude
+- [ ] Web UI for sync management & monitoring
+- [ ] Bulk task import from external tools (Todoist, Notion, etc.)
+- [ ] **Implement automatic section 11.5 TaskHash-less routing**
+- [ ] **Implement automatic section 3.5 GitHub Issue processing**
+- [ ] **Fix Vault task scanning false positives**

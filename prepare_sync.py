@@ -115,6 +115,129 @@ def parse_comment_tasks(comments: List[Dict[str, Any]]) -> List[tuple]:
     return tasks
 
 
+def process_missing_taskhash_issues(owner: str, repo: str, state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    SECTION 3.5: Automatically detect and process GitHub Issues missing TaskHash.
+
+    This is the MANDATORY pre-sync step that ensures all GitHub Issues have:
+    1. TaskHash in the issue title
+    2. TaskHash for all body tasks
+
+    Process:
+    1. Scan all GitHub Issues
+    2. For each Issue without TaskHash in title:
+       - Generate TaskHash for title
+       - Generate TaskHash for all body tasks
+       - Update GitHub Issue with hashes appended
+    3. Return Issue info for OmniFocus Project creation
+
+    Returns:
+        List of Issues that were processed (empty if all already have hashes)
+    """
+    print("\n【SECTION 3.5: Automatic GitHub Issue Processing】")
+    print("Detecting issues without TaskHash in title...\n")
+
+    try:
+        # Get all open issues
+        cmd = [
+            'gh', 'issue', 'list',
+            '--repo', f'{owner}/{repo}',
+            '--state', 'open',
+            '--json', 'number,title,body'
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        issues = json.loads(result.stdout)
+    except subprocess.CalledProcessError as e:
+        print(f"Error fetching GitHub issues: {e.stderr}", file=sys.stderr)
+        return []
+
+    processed_issues = []
+
+    for issue in issues:
+        issue_num = issue['number']
+        title = issue['title']
+        body = issue.get('body', '')
+
+        # Check if title has TaskHash
+        if has_hash(title):
+            print(f"✓ Issue #{issue_num}: {title} (already has TaskHash)")
+            continue
+
+        # MISSING HASH - Process this issue
+        print(f"\n⚠️  Issue #{issue_num}: {title} (MISSING TaskHash)")
+
+        # Generate TaskHash for issue title
+        source_id = make_github_source_id(owner, repo, issue_num, title)
+        issue_hash = compute_hash(source_id)
+        new_title = append_hash(title, source_id)
+
+        print(f"   Generated hash: {issue_hash}")
+        print(f"   New title: {new_title}")
+
+        # Process body tasks - add hashes to unchecked tasks
+        updated_body = body
+        if body:
+            # Find all checkbox tasks
+            task_pattern = r'^(\s*- \[[x\s]\]\s+)([^\n(]+?)(?:\s+\([0-9a-f]{8}\))?(\s*)$'
+
+            def add_hash_to_task(match):
+                prefix = match.group(1)  # "- [ ] " or "- [x] "
+                task_name = match.group(2).strip()
+
+                # Skip if already has hash
+                if has_hash(match.group(0)):
+                    return match.group(0)
+
+                # Generate hash for this task
+                task_source_id = make_github_source_id(owner, repo, issue_num, task_name)
+                task_hash = compute_hash(task_source_id)
+
+                return f"{prefix}{task_name} ({task_hash})"
+
+            updated_body = re.sub(task_pattern, add_hash_to_task, body, flags=re.MULTILINE)
+
+        # Update GitHub Issue
+        try:
+            # Update title
+            subprocess.run(
+                ['gh', 'issue', 'edit', str(issue_num),
+                 '--repo', f'{owner}/{repo}',
+                 '--title', new_title],
+                check=True,
+                capture_output=True
+            )
+            print(f"   ✓ Updated Issue title")
+
+            # Update body if changed
+            if updated_body != body:
+                subprocess.run(
+                    ['gh', 'issue', 'edit', str(issue_num),
+                     '--repo', f'{owner}/{repo}',
+                     '--body', updated_body],
+                    check=True,
+                    capture_output=True
+                )
+                print(f"   ✓ Updated Issue body with task hashes")
+
+            processed_issues.append({
+                'number': issue_num,
+                'title': new_title,
+                'body': updated_body,
+                'hash': issue_hash
+            })
+
+        except subprocess.CalledProcessError as e:
+            print(f"   ✗ Error updating Issue #{issue_num}: {e.stderr}", file=sys.stderr)
+            continue
+
+    if processed_issues:
+        print(f"\n✓ Processed {len(processed_issues)} Issue(s) - added missing TaskHashes")
+    else:
+        print("\n✓ All Issues already have TaskHash")
+
+    return processed_issues
+
+
 def prepare_github_tasks(owner: str, repo: str, state: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Prepare GitHub tasks for sync."""
     tasks_to_add = []
@@ -302,6 +425,22 @@ def find_vault_files(vault_root: Path) -> List[Path]:
     return sorted(markdown_files)
 
 
+def is_section_header_line(line: str) -> bool:
+    """
+    Check if a line is a markdown section header (not a task).
+
+    Examples of headers:
+    - # Title
+    - ## Projects
+    - ### Subsection
+
+    Should NOT match:
+    - - [ ] Task with ## in the middle
+    """
+    # Only match if line STARTS with # (after optional whitespace)
+    return re.match(r'^\s*#{1,6}\s+\S', line) is not None
+
+
 def extract_tasks(file_path: Path, file_content: str) -> List[tuple]:
     """Extract unchecked tasks from markdown file content with parent info."""
     tasks = []
@@ -311,37 +450,97 @@ def extract_tasks(file_path: Path, file_content: str) -> List[tuple]:
     parent_stack = []  # Stack of (indent_level, task_name) tuples
 
     for line_num, line in enumerate(lines, start=1):
+        # SKIP section headers (##, ###, etc.) - not real tasks
+        if is_section_header_line(line):
+            # Clear parent stack when entering new section
+            # This helps with section-based grouping
+            if line.startswith('#'):
+                parent_stack = []
+            continue
+
         # Detect indent level (tabs or spaces)
-        indent_match = re.match(r'^(\t*| +)- \[ \]\s*(.+?)(?:\s*$)', line)
+        # Updated regex: more specific about task format
+        indent_match = re.match(r'^(\t*| {0,8})- \[ \]\s+(.+?)(?:\s*$)', line)
         if indent_match:
             indent_str = indent_match.group(1)
             task_name = indent_match.group(2).strip()
 
-            if task_name:
-                # Calculate indent level (each tab or 2 spaces = 1 level)
-                if indent_str.startswith('\t'):
-                    indent_level = len(indent_str)
-                else:
-                    indent_level = len(indent_str) // 2
+            # Skip empty tasks or metadata-only lines
+            if not task_name or task_name.startswith('(') or task_name.startswith('['):
+                continue
 
-                # Remove due date emoji and date from task name for hash generation
-                task_name_for_hash = re.sub(r'\s+📅\s+\d{4}-\d{2}-\d{2}', '', task_name)
-                task_name_for_hash = re.sub(r'\s+\[due::\s*\d{4}-\d{2}-\d{2}\]', '', task_name_for_hash)
+            # Skip lines that look like metadata (e.g., "Projects (TaskHash なし) - 同期対象外:")
+            if 'TaskHash なし' in task_name or '同期対象外' in task_name:
+                continue
 
-                # Update parent stack based on indent level
-                # Remove parents with same or higher indent level
-                while parent_stack and parent_stack[-1][0] >= indent_level:
-                    parent_stack.pop()
+            # Calculate indent level (each tab or 2 spaces = 1 level)
+            if indent_str.startswith('\t'):
+                indent_level = len(indent_str)
+            else:
+                indent_level = len(indent_str) // 2
 
-                # Get parent task (if any)
-                parent_task = parent_stack[-1][1] if parent_stack else None
+            # Remove due date emoji and date from task name for hash generation
+            task_name_for_hash = re.sub(r'\s+📅\s+\d{4}-\d{2}-\d{2}', '', task_name)
+            task_name_for_hash = re.sub(r'\s+\[due::\s*\d{4}-\d{2}-\d{2}\]', '', task_name_for_hash)
 
-                # Add to stack for future children
-                parent_stack.append((indent_level, task_name_for_hash))
+            # Update parent stack based on indent level
+            # Remove parents with same or higher indent level
+            while parent_stack and parent_stack[-1][0] >= indent_level:
+                parent_stack.pop()
 
-                tasks.append((task_name_for_hash, line_num, indent_level, parent_task))
+            # Get parent task (if any)
+            parent_task = parent_stack[-1][1] if parent_stack else None
+
+            # Add to stack for future children
+            parent_stack.append((indent_level, task_name_for_hash))
+
+            tasks.append((task_name_for_hash, line_num, indent_level, parent_task))
 
     return tasks
+
+
+def is_project_name_task(task_name: str, content: str, file_path: Path) -> bool:
+    """
+    Check if a task is a Project name (TaskHashless Project top-level task).
+
+    Project name tasks:
+    - Are top-level (no parent)
+    - Match OmniFocus Project names (Later, Someday, etc.)
+    - Should NOT be synced (they are Project containers, not real tasks)
+    - Listed in a "## Projects" or "## New Single Action Projects" section
+
+    Args:
+        task_name: Clean task name
+        content: File content
+        file_path: File path
+
+    Returns:
+        True if this task is a Project name (should be skipped)
+    """
+    # Look for section headers that indicate Project names
+    project_sections = [
+        r"^##\s+Projects\s*$",
+        r"^##\s+New Single Action Projects\s*$",
+        r"^##\s+Inbox Projects\s*$",
+    ]
+
+    # Split by sections
+    sections = re.split(r"^(##\s+.*?)$", content, flags=re.MULTILINE)
+
+    for i in range(1, len(sections), 2):
+        section_header = sections[i]
+        section_content = sections[i + 1] if i + 1 < len(sections) else ""
+
+        # Check if this section is a Project section
+        is_project_section = any(re.match(pattern, section_header) for pattern in project_sections)
+
+        if is_project_section:
+            # Check if the task appears in this section
+            task_pattern = re.escape(task_name)
+            if re.search(f"^\\s*-\\s+\\[\\s*[\\sx]\\s*\\]\\s+{task_pattern}", section_content, re.MULTILINE):
+                return True
+
+    return False
 
 
 def prepare_vault_tasks(vault_root: Path, state: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -386,17 +585,32 @@ def prepare_vault_tasks(vault_root: Path, state: Dict[str, Any]) -> List[Dict[st
             task_name_to_hash[cleaned_task_name] = task_hash
 
         # Second pass: Process each task with parent references available
+        # Track Project container names so their children are also skipped
+        skipped_containers: set = set()
+
         for task_name, line_num, indent_level, parent_task in tasks:
             # Extract URLs from Markdown links and clean task name
             urls = get_markdown_urls(task_name)
             cleaned_task_name = clean_markdown_links(task_name)
 
-            # Skip tasks that are part of OmniFocus Projects
-            # (OmniFocus Projects correspond to GitHub Issues, not Vault tasks)
-            # Tasks with a parent_task are part of a Project and should not be synced to Vault
-            if parent_task:
-                print(f"  ⊘ {cleaned_task_name} (part of OmniFocus Project - skip)")
+            # Skip Project name tasks (TaskHashless Project top-level containers)
+            # These are managed in OmniFocus as Projects, not as individual tasks
+            if indent_level == 0 and is_project_name_task(cleaned_task_name, content, file_path):
+                print(f"  ⊘ {cleaned_task_name} (Project name - not a task, skip)")
+                skipped_containers.add(task_name)  # Track to propagate skip to children
                 continue
+
+            # Skip children of Project containers (e.g., tasks inside "Later", "Someday")
+            # Regular nested Vault tasks (children of real tasks) ARE synced with parentTaskHash
+            if parent_task:
+                # Normalize parent name for comparison (strip dates/hashes)
+                parent_normalized = clean_markdown_links(parent_task)
+                parent_normalized = re.sub(r'\s+📅\s+\d{4}-\d{2}-\d{2}', '', parent_normalized).strip()
+                parent_normalized = re.sub(r'\s+\[due::\s*\d{4}-\d{2}-\d{2}\]', '', parent_normalized).strip()
+                if parent_normalized in skipped_containers or parent_task in skipped_containers:
+                    print(f"  ⊘ {cleaned_task_name} (child of Project container - skip)")
+                    skipped_containers.add(task_name)  # Propagate to grandchildren
+                    continue
 
             # Determine if already has hash
             if has_hash(cleaned_task_name):
@@ -419,7 +633,7 @@ def prepare_vault_tasks(vault_root: Path, state: Dict[str, Any]) -> List[Dict[st
                 # Build note with URLs only (source_id tracked via hash)
                 note = "\n".join(urls) if urls else ""
 
-                # Prepare task dict (no parent reference for Vault tasks)
+                # Prepare task dict — include parentTaskHash for nested Vault tasks
                 task_dict = {
                     "type": "task",
                     "name": task_name_with_hash,
@@ -427,6 +641,15 @@ def prepare_vault_tasks(vault_root: Path, state: Dict[str, Any]) -> List[Dict[st
                     "hash": task_hash,
                     "source_id": source_id
                 }
+
+                # Resolve parent task hash for hierarchical Vault tasks
+                if parent_task:
+                    parent_cleaned = clean_markdown_links(parent_task)
+                    parent_cleaned = re.sub(r'\s+📅\s+\d{4}-\d{2}-\d{2}', '', parent_cleaned).strip()
+                    parent_cleaned = re.sub(r'\s+\[due::\s*\d{4}-\d{2}-\d{2}\]', '', parent_cleaned).strip()
+                    parent_hash = task_name_to_hash.get(parent_cleaned)
+                    if parent_hash:
+                        task_dict["parentTaskHash"] = parent_hash
 
                 # Add task
                 tasks_to_add.append(task_dict)
@@ -458,14 +681,29 @@ def main():
     state = load_state()
     all_tasks = []
 
-    # Prepare GitHub tasks
+    print("=" * 70)
+    print("TASK SYNC PREPARATION - Full Workflow")
+    print("=" * 70)
+
+    # STEP 0: Process missing GitHub Issue TaskHashes (SECTION 3.5)
+    # This MUST run before prepare_github_tasks to ensure all Issues have hashes
     if '/' in args.repo:
         owner, repo = args.repo.split('/', 1)
+        print("\n【STEP 0: Automatic GitHub Issue Processing (Section 3.5)】")
+        processed = process_missing_taskhash_issues(owner, repo, state)
+        # Reload state after processing
+        state = load_state()
+
+    # STEP 1: Prepare GitHub tasks
+    if '/' in args.repo:
+        owner, repo = args.repo.split('/', 1)
+        print("\n【STEP 1: Scanning GitHub Issues】")
         github_tasks = prepare_github_tasks(owner, repo, state)
         all_tasks.extend(github_tasks)
 
-    # Prepare Vault tasks
+    # STEP 2: Prepare Vault tasks
     if args.vault_root.exists():
+        print("\n【STEP 2: Scanning Vault Files】")
         vault_tasks = prepare_vault_tasks(args.vault_root, state)
         all_tasks.extend(vault_tasks)
 
@@ -477,8 +715,10 @@ def main():
             "total_count": len(all_tasks)
         }, f, indent=2, ensure_ascii=False)
 
-    print(f"\n✓ Prepared {len(all_tasks)} tasks for sync")
+    print("\n" + "=" * 70)
+    print(f"✓ Prepared {len(all_tasks)} tasks for sync")
     print(f"Output: {PREPARE_FILE}")
+    print("=" * 70)
     print("\nNext: Ask Claude to sync these tasks to OmniFocus via MCP")
 
 

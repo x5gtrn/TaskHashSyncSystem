@@ -2,12 +2,5 @@
 
 *.pyc
 
-completed_tasks.txt
-completed_tasks.json
-completed_today.json
-completed_today_sync.json
-completed_today_with_projects.json
-inbox_tasks_to_sync.json
-sync_state.json
-tasks_resolved.json
-tasks_to_sync.json
+*.txt
+*.json
