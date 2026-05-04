@@ -1130,7 +1130,7 @@ Completed Today:
 
 ## Implemented Features & Status
 
-### ✅ Completed (v2.3)
+### ✅ Completed (v2.5 - May 5, 2026)
 
 - [x] Immutable TaskHash generation (CRC32)
 - [x] GitHub Issue → OmniFocus Project conversion
@@ -1159,7 +1159,7 @@ Completed Today:
 
 ## Implementation Status
 
-### Current State (v2.3 - May 4, 2026)
+### Current State (v2.5 - May 5, 2026)
 
 #### ✅ Fully Working
 
@@ -1272,6 +1272,6 @@ When modifying TaskHashSyncSystem:
 
 ---
 
-**Version:** 2.4  
-**Last Updated:** 2026-05-04  
+**Version:** 2.5  
+**Last Updated:** 2026-05-05  
 **Maintained By:** [@x5gtrn](https://daisuke.masuda.tokyo)

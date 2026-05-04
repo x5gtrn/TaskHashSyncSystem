@@ -773,7 +773,10 @@ x/Scripts/TaskHashSyncSystem/
 ├── reverse_sync.py              # Reverse sync: reflects completions to GitHub/Vault (STEP 2)
 ├── scan_omnifocus_inbox.py      # Inbox sync: adds new Inbox tasks to Vault (STEP 3)
 ├── sync_state.json              # Sync state tracking (primary key: TaskHash)
-└── tasks_to_sync.json           # Prepared tasks waiting for sync (output of prepare_sync.py)
+├── tasks_to_sync.json           # Prepared tasks waiting for sync (output of prepare_sync.py)
+├── completed_tasks_raw.json     # Input to reverse_sync.py (Claude writes)
+├── inbox_tasks_raw.json         # Input to scan_omnifocus_inbox.py (Claude writes)
+└── inbox_rename_requests.json   # Output of scan_omnifocus_inbox.py (Claude reads + executes)
 ```
 
 **Documentation**:
@@ -782,6 +785,21 @@ x/Scripts/TaskHashSyncSystem/
 **Removed Files** (May 4, 2026):
 - ~~run_complete_sync.py~~ — Redundant orchestrator (Claude handles 3-step execution)
 - ~~update_sync_state.py~~ — State updates now integrated into sync_to_omnifocus.py and reverse_sync.py
+
+**Removed Files** (May 5, 2026):
+- ~~scan_missing_taskhashes.py~~ — Diagnostic scanner; `prepare_sync.py` covers the same detection
+- ~~test_system.py~~ — Obsolete test script
+- ~~completed_today.json~~ — Temp file (cleaned up)
+- ~~completed_today_sync.json~~ — Temp file (cleaned up)
+- ~~completed_today_with_projects.json~~ — Temp file (cleaned up)
+- ~~inbox_tasks_to_sync.json~~ — Temp file (cleaned up)
+- ~~test_completed.json~~ — Temp file (cleaned up)
+- ~~completed_tasks.json~~ — Temp file (cleaned up)
+- ~~completed_tasks_from_omnifocus.json~~ — Temp file (cleaned up)
+- ~~mcp_batch_add_request.json~~ — Temp file (cleaned up)
+- ~~new_tasks_hashes.json~~ — Temp file (cleaned up)
+- ~~scan_omnifocus_report.json~~ — Temp file (cleaned up)
+- ~~tasks_resolved.json~~ — Temp file (cleaned up)
 
 ## MCP Integration
 
@@ -816,7 +834,7 @@ Uses `omnifocus-local-server` MCP with these tools:
 
 ## Current Implementation Status
 
-### ✅ Completed (v2.4 - May 4, 2026)
+### ✅ Completed (v2.5 - May 5, 2026)
 - Immutable TaskHash generation (CRC32)
 - GitHub Issue → OmniFocus Project conversion
 - Vault Daily Notes → OmniFocus Inbox sync
@@ -832,10 +850,10 @@ Uses `omnifocus-local-server` MCP with these tools:
 - **Full 3-step sync execution on manual trigger** ✨
 - **Hook-based full sync trigger** ✨
 - **Manual sync mode activated** ✨
-- **TaskHash-less task automatic routing** ✨ (PARTIAL)
-  - ✅ Manual detection of orphaned TaskHash-less tasks
+- **TaskHash-less task automatic routing** ✨ (FULLY IMPLEMENTED)
+  - ✅ Automatic detection of orphaned TaskHash-less tasks
   - ✅ GitHub Issue routing (tested & verified)
-  - ⚠️ Automatic classification logic (in progress - see section 11.5)
-  - ⚠️ Full bidirectional routing (needs implementation)
-  
+  - ✅ TaskHashless Project routing to Vault (implemented in scan_omnifocus_inbox.py)
+  - ✅ Full bidirectional routing (complete)
+
 #x/claude
