@@ -2,11 +2,21 @@
 """
 Prepare Tasks for OmniFocus Sync via MCP
 
-Scans GitHub Issues and Vault tasks, generates hashes, and outputs
-a JSON file ready for Claude to add via MCP tools.
+SCOPE:
+  - GitHub Issues: Scans all open issues (full content)
+  - Vault Tasks: Scans ONLY the Calendar/ folder
+    (Daily Notes, time-based notes, etc.)
+
+Generates TaskHash for each task and outputs a JSON file ready for
+Claude to add via MCP tools.
 
 This separates data preparation from the actual OmniFocus insertion,
 making it more flexible and robust.
+
+Excluded:
+  - Atlas/ (knowledge notes, MOCs, references)
+  - Efforts/ (project metadata)
+  - x/ (scripts, templates, AI-generated content)
 """
 
 import json
@@ -404,23 +414,22 @@ def prepare_github_tasks(owner: str, repo: str, state: Dict[str, Any]) -> List[D
 
 
 def find_vault_files(vault_root: Path) -> List[Path]:
-    """Find all markdown files in vault that should be scanned."""
-    exclude_patterns = ["x/Templates", "x/Scripts", ".obsidian", "Example", "CLAUDE", "Task-Hash-Sync-System"]
+    """Find all markdown files in Calendar folder only.
+
+    IMPORTANT: Only syncs Calendar folder (Daily Notes, etc.).
+    Excludes: Atlas, Efforts, x/ (except designated sync folders)
+    """
+    # Only scan Calendar folder
+    calendar_path = vault_root / "Calendar"
+
+    if not calendar_path.exists():
+        print(f"⚠️  Calendar folder not found at {calendar_path}")
+        return []
 
     markdown_files = []
-    for file_path in vault_root.rglob('*.md'):
+    for file_path in calendar_path.rglob('*.md'):
         relative_path = file_path.relative_to(vault_root)
-        path_str = str(relative_path)
-
-        # Check exclusions
-        skip = False
-        for pattern in exclude_patterns:
-            if pattern in path_str:
-                skip = True
-                break
-
-        if not skip:
-            markdown_files.append(relative_path)
+        markdown_files.append(relative_path)
 
     return sorted(markdown_files)
 
