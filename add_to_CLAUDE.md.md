@@ -1,27 +1,4 @@
-# Task Synchronization System (OmniFocus ↔ GitHub ↔ Vault)
-
-## Overview
-
-A **bidirectional task synchronization system** with three distinct sync domains:
-
-1. **GitHub Issues ↔ OmniFocus Projects**: GitHub Issues are Projects in OmniFocus
-2. **Vault Daily Notes ↔ OmniFocus Inbox**: Daily Notes contain Inbox tasks only
-3. **State Management**: CRC32-based TaskHash (8-digit hex) for immutable task identification
-
-Each task receives a unique **TaskHash** (e.g., `(73801d05)`) that **never changes**, regardless of task content modifications. This ensures reliable tracking across systems.
-
-## Core Components
-
-### 1. TaskHash - Immutable Task Identification
-
-**Definition**: A CRC32 hash generated once per task, immutable for the task's lifetime.
-
-**Generation** (`task_hash.py`):
-- **Algorithm**: CRC32 based on `task {size}\0{source_id}` format
-- **Format**: 8-digit lowercase hexadecimal
-- **Source ID format**: 
-  - GitHub: `github:owner/repo#issue_num:task_name`
-  - Vault: `vault:relative/path/to/file.md:task_name`
+t:relative/path/to/file.md:task_name`
   - GitHub comments: `github:owner/repo#issue_num:comment#N:task_name`
 - **Immutability**: Once generated, TaskHash never changes even if task name/content is modified
 - **Uniqueness**: Same source_id always produces same hash (idempotent)
@@ -485,7 +462,14 @@ When the user says **"sync tasks"** or equivalent command:
 #### STEP 1 — Forward Sync (Vault/GitHub → OmniFocus)
 - Read `tasks_to_sync.json` (output of `prepare_sync.py`)
 - If new tasks exist: run `python3 sync_to_omnifocus.py`
-- Adds new tasks to OmniFocus Inbox or Projects
+  - This outputs `precheck_requests.json` — a list of existence checks Claude MUST perform
+- **PRE-EXISTENCE CHECK (mandatory, prevents duplicates)**:
+  - Read `precheck_requests.json`
+  - For **each item** in `checks[]`: call `mcp__omnifocus-local-server__get_task_by_id` with `taskName`
+  - **If found** in OmniFocus → record the existing `id` in `sync_state.json`, remove item from the batch
+  - **If absent** → keep item in the batch
+- Call `mcp__omnifocus-local-server__batch_add_items` with the **filtered** batch (absent items only)
+- Update `sync_state.json` with new OmniFocus IDs
 
 #### STEP 2 — Reverse Sync (OmniFocus → Vault/GitHub)
 - Call MCP: `mcp__omnifocus-local-server__filter_tasks` with `completedToday=true`
@@ -701,11 +685,12 @@ x/Scripts/TaskHashSyncSystem/
 ├── README.md                    # Complete specification document
 ├── task_hash.py                 # TaskHash generation + utilities (used by all scripts)
 ├── prepare_sync.py              # Data preparation + GitHub Issue auto-processing (STEP 0)
-├── sync_to_omnifocus.py         # Forward sync: resolves hashes, adds to OmniFocus (STEP 1)
+├── sync_to_omnifocus.py         # Forward sync: resolves hashes, outputs precheck + batch (STEP 1)
 ├── reverse_sync.py              # Reverse sync: reflects completions to GitHub/Vault (STEP 2)
 ├── scan_omnifocus_inbox.py      # All-tasks scan: routes hashless tasks → Vault/GitHub (STEP 3)
 ├── sync_state.json              # Sync state tracking (primary key: TaskHash)
 ├── tasks_to_sync.json           # Prepared tasks waiting for sync (output of prepare_sync.py)
+├── precheck_requests.json       # Pre-existence checks Claude MUST run before batch_add_items
 ├── completed_tasks_raw.json     # Input to reverse_sync.py (Claude writes)
 ├── all_tasks_raw.json           # Input to scan_omnifocus_inbox.py (Claude writes from dump_database)
 └── inbox_rename_requests.json   # Output of scan_omnifocus_inbox.py (Claude reads + executes)
@@ -787,3 +772,5 @@ Uses `omnifocus-local-server` MCP with these tools:
   - ✅ GitHub Issue routing (tested & verified)
   - ✅ TaskHashless Project routing to Vault (implemented in scan_omnifocus_inbox.py)
   - ✅ Full bidirectional routing (complete)
+
+#x/claude

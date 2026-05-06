@@ -157,6 +157,7 @@ Vault Daily Note Task:
 | `tasks_to_sync.json` | Queue: output of prepare_sync.py, consumed by sync_to_omnifocus.py |
 | `tasks_resolved.json` | Intermediate: parentTaskHash resolved to parentTaskId |
 | `mcp_batch_add_request.json` | Formatted MCP batch_add_items request for Claude |
+| `precheck_requests.json` | Existence checks Claude MUST run (get_task_by_id) before batch_add_items |
 | `all_tasks_raw.json` | Input to scan_omnifocus_inbox.py (Claude normalizes from dump_database output) |
 | `inbox_rename_requests.json` | List of edit_item calls for Claude to rename OmniFocus tasks |
 
@@ -852,7 +853,8 @@ Output: /path/to/tasks_to_sync.json
 
 ### sync_to_omnifocus.py
 
-Helper script to resolve parent-child relationships and validate tasks before adding to OmniFocus.
+Resolves parent-child relationships, validates tasks, and generates the pre-existence check
+list that Claude MUST run before calling `batch_add_items`.
 
 **Usage:**
 ```bash
@@ -864,9 +866,30 @@ python3 sync_to_omnifocus.py [--dry-run] [--verbose]
 2. Load tasks_to_sync.json
 3. Validate all tasks (required fields, hash format)
 4. For each task with parentTaskHash: resolve → OmniFocus task ID
-5. Generate `tasks_resolved.json` and `mcp_batch_add_request.json`
+5. Generate `precheck_requests.json` — existence checks for Claude
+6. Generate `tasks_resolved.json` and `mcp_batch_add_request.json`
 
-**Note:** Actual OmniFocus task addition is done via MCP tools (add_omnifocus_task, batch_add_items).
+**Output files:**
+- `precheck_requests.json` — Claude reads this and runs `get_task_by_id` for every item
+- `mcp_batch_add_request.json` — filtered batch after pre-existence check
+
+**⚠️ Pre-existence check (mandatory):**
+
+`sync_state.json` is the only deduplication guard, but it can be out of sync with OmniFocus
+(e.g., after a sync_state.json reset or after manual OmniFocus edits). To prevent duplicate
+projects/tasks, Claude MUST verify existence before adding:
+
+```
+For each item in precheck_requests.json["checks"]:
+  result = get_task_by_id(taskName=item["task_name"])
+  if result found:
+    → record existing OmniFocus ID in sync_state.json
+    → EXCLUDE this item from batch_add_items call
+  if result absent:
+    → include item in batch_add_items call as normal
+```
+
+Skipping this check is the root cause of duplicate project creation.
 
 ### update_sync_state.py
 

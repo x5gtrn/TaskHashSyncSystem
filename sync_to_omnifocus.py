@@ -6,8 +6,17 @@ Workflow:
 1. Load tasks from tasks_to_sync.json
 2. Resolve parentTaskHash to parentTaskId
 3. Generate formatted items for batch_add_items MCP call
-4. Prepare request summary for Claude MCP execution
-5. Output ready-to-use JSON for immediate MCP execution
+4. Output pre-existence check requests (Claude MUST verify before adding)
+5. Output ready-to-use JSON for MCP execution
+
+PRE-EXISTENCE CHECK (mandatory):
+  Before calling batch_add_items, Claude MUST call get_task_by_id for every
+  task/project name in the batch to detect existing items in OmniFocus.
+  - If found:  record the existing OmniFocus ID in sync_state.json → SKIP creation
+  - If absent: proceed with batch_add_items as normal
+
+  This prevents duplicate projects/tasks when sync_state.json is out of sync
+  with OmniFocus reality (e.g., after a reset or manual OmniFocus edits).
 
 Usage:
   python3 sync_to_omnifocus.py                    # Default: prepare for MCP
@@ -27,6 +36,7 @@ PREPARE_FILE = SCRIPT_DIR / "tasks_to_sync.json"
 STATE_FILE = SCRIPT_DIR / "sync_state.json"
 RESOLVED_FILE = SCRIPT_DIR / "tasks_resolved.json"
 MCP_REQUEST_FILE = SCRIPT_DIR / "mcp_batch_add_request.json"
+PRECHECK_FILE = SCRIPT_DIR / "precheck_requests.json"
 
 
 def load_state() -> Dict[str, Any]:
@@ -148,6 +158,38 @@ def format_for_mcp(resolved_tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     return items
 
 
+def generate_precheck_requests(resolved_tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Generate a list of get_task_by_id calls Claude MUST run before batch_add_items.
+
+    For each task/project to be added, Claude calls get_task_by_id(taskName=<name>).
+    If the item already exists in OmniFocus, Claude:
+      1. Records the existing OmniFocus ID in sync_state.json
+      2. Removes that item from the batch_add_items call (skip creation)
+
+    This prevents duplicates when sync_state.json is out of sync with OmniFocus.
+    """
+    checks = []
+    for task in resolved_tasks:
+        checks.append({
+            "task_name": task["name"],
+            "task_hash": task.get("hash", ""),
+            "task_type": task.get("type", "task"),
+            "action_if_found": "record_existing_id_and_skip",
+            "action_if_absent": "include_in_batch_add",
+        })
+    return {
+        "instruction": (
+            "MANDATORY: Before calling batch_add_items, call get_task_by_id for EACH item below. "
+            "If found → record its ID in sync_state.json and EXCLUDE it from batch_add_items. "
+            "If absent → include it in batch_add_items as normal."
+        ),
+        "checks": checks,
+        "count": len(checks),
+        "generated_at": datetime.now().isoformat(),
+    }
+
+
 def generate_mcp_request(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Generate formatted MCP batch_add_items request."""
     return {
@@ -215,26 +257,41 @@ def main():
     mcp_items = format_for_mcp(resolved_tasks)
     mcp_request = generate_mcp_request(mcp_items)
 
+    # Generate pre-existence check requests
+    precheck = generate_precheck_requests(resolved_tasks)
+
     if args.dry_run:
         print("🏃 DRY RUN - Would submit the following MCP request:")
         print(f"\nMCP Tool: mcp__omnifocus-local-server__batch_add_items")
         print(f"Items count: {len(mcp_items)}")
-        print(f"Request saved to: {MCP_REQUEST_FILE}")
+        print(f"\n⚠️  PRE-EXISTENCE CHECKS required ({len(precheck['checks'])} items):")
+        for c in precheck["checks"]:
+            print(f"   → get_task_by_id(taskName='{c['task_name']}')")
 
         # Save for review
         with open(MCP_REQUEST_FILE, 'w') as f:
             json.dump(mcp_request, f, indent=2, ensure_ascii=False)
+        with open(PRECHECK_FILE, 'w') as f:
+            json.dump(precheck, f, indent=2, ensure_ascii=False)
 
         return 0
+
+    # Save pre-existence check requests
+    with open(PRECHECK_FILE, 'w') as f:
+        json.dump(precheck, f, indent=2, ensure_ascii=False)
+    print(f"✓ Pre-existence check requests saved to: {PRECHECK_FILE}")
 
     # Save MCP request for Claude execution
     with open(MCP_REQUEST_FILE, 'w') as f:
         json.dump(mcp_request, f, indent=2, ensure_ascii=False)
 
     print(f"✓ MCP request saved to: {MCP_REQUEST_FILE}")
-    print(f"\n🎯 Next step:")
-    print(f"   Claude will execute the MCP batch_add_items call")
-    print(f"   Then run: python3 update_sync_state.py")
+    print(f"\n🎯 Next steps (MANDATORY ORDER):")
+    print(f"   1. Claude reads precheck_requests.json")
+    print(f"   2. Claude calls get_task_by_id for EACH item")
+    print(f"   3. If item exists → record ID in sync_state.json, remove from batch")
+    print(f"   4. If item absent → keep in batch")
+    print(f"   5. Claude calls batch_add_items with filtered batch")
 
     return 0
 
