@@ -298,7 +298,7 @@ def project_has_task_hash(project_name: str, state: Dict[str, Any]) -> bool:
     Check if a project has a TaskHash (i.e., was created from GitHub Issue).
 
     Args:
-        project_name: Name of the project (e.g., "Later", "MoneyWizを完璧にする")
+        project_name: Name of the project (e.g., "Later", "Someday")
         state: sync_state.json content
 
     Returns:

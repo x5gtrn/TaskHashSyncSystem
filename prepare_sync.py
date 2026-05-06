@@ -144,7 +144,7 @@ def process_missing_taskhash_issues(owner: str, repo: str, state: Dict[str, Any]
     Returns:
         List of Issues that were processed (empty if all already have hashes)
     """
-    print("\n【SECTION 3.5: Automatic GitHub Issue Processing】")
+    print("\n[SECTION 3.5: Automatic GitHub Issue Processing]")
     print("Detecting issues without TaskHash in title...\n")
 
     try:
@@ -478,8 +478,9 @@ def extract_tasks(file_path: Path, file_content: str) -> List[tuple]:
             if not task_name or task_name.startswith('(') or task_name.startswith('['):
                 continue
 
-            # Skip lines that look like metadata (e.g., "Projects (TaskHash なし) - 同期対象外:")
-            if 'TaskHash なし' in task_name or '同期対象外' in task_name:
+            # Skip lines that look like metadata (e.g., "Projects (no TaskHash) - excluded from sync:")
+            if 'TaskHash なし' in task_name or '同期対象外' in task_name \
+                    or 'no TaskHash' in task_name or 'excluded from sync' in task_name:
                 continue
 
             # Calculate indent level (each tab or 2 spaces = 1 level)
@@ -698,7 +699,7 @@ def main():
     # This MUST run before prepare_github_tasks to ensure all Issues have hashes
     if '/' in args.repo:
         owner, repo = args.repo.split('/', 1)
-        print("\n【STEP 0: Automatic GitHub Issue Processing (Section 3.5)】")
+        print("\n[STEP 0: Automatic GitHub Issue Processing (Section 3.5)]")
         processed = process_missing_taskhash_issues(owner, repo, state)
         # Reload state after processing
         state = load_state()
@@ -706,13 +707,13 @@ def main():
     # STEP 1: Prepare GitHub tasks
     if '/' in args.repo:
         owner, repo = args.repo.split('/', 1)
-        print("\n【STEP 1: Scanning GitHub Issues】")
+        print("\n[STEP 1: Scanning GitHub Issues]")
         github_tasks = prepare_github_tasks(owner, repo, state)
         all_tasks.extend(github_tasks)
 
     # STEP 2: Prepare Vault tasks
     if args.vault_root.exists():
-        print("\n【STEP 2: Scanning Vault Files】")
+        print("\n[STEP 2: Scanning Vault Files]")
         vault_tasks = prepare_vault_tasks(args.vault_root, state)
         all_tasks.extend(vault_tasks)
 

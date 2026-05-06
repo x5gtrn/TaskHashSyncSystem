@@ -187,8 +187,8 @@ def classify_task_by_parent(
 def detect_new_tasks(inbox_tasks: List[Dict], state: Dict[str, Any]) -> List[Dict]:
     """
     Filter inbox tasks to only those that need processing:
-      - TaskHash なし (has_hash returns False)
-      - まだ sync_state.json に source_id として存在しない
+      - No TaskHash in name (has_hash returns False)
+      - Not yet tracked in sync_state.json as a source_id
 
     Returns list of unprocessed tasks.
     """
@@ -380,7 +380,7 @@ def create_daily_note_content(date_str: str) -> str:
         f"## Tasks\n"
         f"\n"
         f"## Projects\n"
-        f"Projects (TaskHash なし) - 同期対象外:\n"
+        f"Projects (no TaskHash) - excluded from sync:\n"
     )
 
 
@@ -545,9 +545,9 @@ def save_github_additions(github_enriched: List[Dict]) -> None:
         "additions_by_issue": {
           "2": [
             {
-              "task_name": "企業Aに応募する",
+              "task_name": "Apply to Company A",
               "task_hash": "35f7a9d2",
-              "source_id": "github:x5gtrn/LIFE#2:企業Aに応募する"
+              "source_id": "github:x5gtrn/LIFE#2:Apply to Company A"
             }
           ]
         }
