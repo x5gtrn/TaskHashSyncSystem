@@ -1,30 +1,44 @@
 #!/usr/bin/env python3
 """
-scan_omnifocus_inbox.py - OmniFocus Inbox → Vault/GitHub Sync
+scan_omnifocus_inbox.py - OmniFocus All-Tasks → Vault/GitHub Sync
 
-OmniFocus Inbox に TaskHash なしのタスクを検出し、親情報に基づいて分類・同期：
-  1. 各 TaskHash-less タスクの親情報を取得
-  2. 親が GitHub Issue Project か判定
-     - YES: GitHub Issue に新規タスク追加として分類
-     - NO:  Vault Daily Note に追加として分類
-  3. 各ルートで TaskHash を生成
-  4. 対応する sync_state.json と rename_requests を生成
+Scans ALL OmniFocus tasks (Inbox + all Projects) for TaskHash-less tasks
+and routes them to the correct destination based on parent Project info:
+
+  1. Extract all tasks without a TaskHash from the full OmniFocus database
+  2. For each hashless task, inspect its parent Project:
+     - Parent Project HAS a TaskHash (= GitHub Issue Project)
+       → classify as github_issue_child → add to GitHub Issue body
+     - Parent Project has NO TaskHash (= native OmniFocus project like "Later")
+       OR task has no parent (= Inbox task)
+       → classify as vault_task → add to today's Vault Daily Note
+  3. Generate TaskHash for each classified task
+  4. Write sync_state.json, inbox_rename_requests.json, github_issue_additions.json
 
 Usage:
-  python3 scan_omnifocus_inbox.py --inbox-tasks inbox_tasks_raw.json [--date YYYY-MM-DD] [--dry-run] [--verbose]
+  python3 scan_omnifocus_inbox.py --tasks all_tasks_raw.json [--date YYYY-MM-DD] [--dry-run] [--verbose]
+  python3 scan_omnifocus_inbox.py --inbox-tasks inbox_tasks_raw.json  # deprecated alias
 
-Input (inbox_tasks_raw.json) is created by Claude from mcp__omnifocus-local-server__get_inbox_tasks:
+Input (all_tasks_raw.json) is created by Claude from mcp__omnifocus-local-server__dump_database.
+Claude normalizes the raw dump into the following format:
   {
-    "fetched_at": "2026-05-03T12:00:00",
+    "fetched_at": "2026-05-06T12:00:00",
     "tasks": [
-      { "id": "OFTaskID123", "name": "部屋片付ける", "note": "", "due_date": null }
+      {
+        "id": "OFTaskID123",
+        "name": "Buy groceries",
+        "note": "",
+        "due_date": null,
+        "parent_name": "Later"
+      }
     ]
   }
+  parent_name = name of the containing Project (omit or null for true Inbox tasks)
 
 Output:
-  - inbox_rename_requests.json: Claude が read → edit_item 呼び出し
-  - github_issue_additions.json: GitHub Issue に追加するタスク群
-  - sync_state.json: 更新済み
+  - inbox_rename_requests.json: edit_item calls for Claude to rename OmniFocus tasks
+  - github_issue_additions.json: tasks to be added to GitHub Issue bodies
+  - sync_state.json: updated with new entries
 """
 
 import argparse
@@ -47,6 +61,7 @@ VAULT_ROOT = Path("/Users/x5gtrn/Library/Mobile Documents/iCloud~md~obsidian/Doc
 STATE_FILE = SCRIPT_DIR / "sync_state.json"
 RENAME_REQUESTS_FILE = SCRIPT_DIR / "inbox_rename_requests.json"
 GITHUB_ADDITIONS_FILE = SCRIPT_DIR / "github_issue_additions.json"
+ALL_TASKS_FILE = SCRIPT_DIR / "all_tasks_raw.json"
 
 # GitHub config
 GITHUB_OWNER = "x5gtrn"
@@ -71,17 +86,20 @@ def save_state(state: Dict[str, Any]) -> None:
 
 # ─── Input Loading ────────────────────────────────────────────────────────────
 
-def load_inbox_tasks(path: Path) -> List[Dict]:
-    """Load OmniFocus Inbox tasks from inbox_tasks_raw.json.
+def load_tasks(path: Path) -> List[Dict]:
+    """Load OmniFocus tasks from all_tasks_raw.json (or inbox_tasks_raw.json).
 
-    Accepts multiple formats:
-      {"tasks": [{"id": "...", "name": "...", ...}, ...]}
+    Claude normalizes dump_database() output into this format before calling the script:
+      {"tasks": [{"id": "...", "name": "...", "due_date": null, "parent_name": "ProjectName"}, ...]}
+
+    Also accepts a plain list:
       [{"id": "...", "name": "...", ...}, ...]
     """
     if not path.exists():
         raise FileNotFoundError(
-            f"Inbox tasks file not found: {path}\n"
-            "Create it by calling mcp__omnifocus-local-server__get_inbox_tasks and saving the output."
+            f"Tasks file not found: {path}\n"
+            "Create it by calling mcp__omnifocus-local-server__dump_database,\n"
+            "normalizing all incomplete tasks with parent_name, and saving as all_tasks_raw.json."
         )
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -93,6 +111,12 @@ def load_inbox_tasks(path: Path) -> List[Dict]:
     else:
         tasks = []
     return tasks
+
+
+# Keep deprecated name as alias for backward compatibility
+def load_inbox_tasks(path: Path) -> List[Dict]:
+    """Deprecated: use load_tasks() instead."""
+    return load_tasks(path)
 
 
 # ─── Parent Task Detection ────────────────────────────────────────────────────
@@ -556,13 +580,26 @@ def save_github_additions(github_enriched: List[Dict]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Scan OmniFocus Inbox for TaskHash-less tasks and route to GitHub/Vault."
+        description=(
+            "Scan ALL OmniFocus tasks for TaskHash-less items and route to Vault Daily Note or GitHub Issue.\n"
+            "Tasks whose parent Project has no TaskHash (or have no parent) → Vault Daily Note.\n"
+            "Tasks whose parent Project has a TaskHash (GitHub Issue Project) → GitHub Issue."
+        )
     )
-    parser.add_argument(
-        "--inbox-tasks",
-        required=True,
+    # Primary argument: all tasks from dump_database
+    tasks_group = parser.add_mutually_exclusive_group(required=True)
+    tasks_group.add_argument(
+        "--tasks",
         type=str,
-        help="Path to inbox_tasks_raw.json (created by Claude from get_inbox_tasks MCP call)",
+        help=(
+            "Path to all_tasks_raw.json — all OmniFocus tasks normalized by Claude from dump_database(). "
+            "Format: {\"tasks\": [{\"id\": \"...\", \"name\": \"...\", \"due_date\": null, \"parent_name\": \"ProjectName\"}]}"
+        ),
+    )
+    tasks_group.add_argument(
+        "--inbox-tasks",
+        type=str,
+        help="Deprecated alias for --tasks. Accepts inbox_tasks_raw.json format.",
     )
     parser.add_argument(
         "--date",
@@ -589,28 +626,32 @@ def main() -> int:
         print(f"Target date: {target_date}")
         print(f"Dry run: {args.dry_run}")
 
-    # Load inputs
-    inbox_path = Path(args.inbox_tasks)
+    # Resolve input file path (--tasks takes precedence; --inbox-tasks is deprecated alias)
+    tasks_path_str = args.tasks or args.inbox_tasks
+    tasks_path = Path(tasks_path_str)
+    if args.inbox_tasks and not args.tasks:
+        print("Warning: --inbox-tasks is deprecated. Use --tasks with all_tasks_raw.json instead.")
+
     try:
-        inbox_tasks = load_inbox_tasks(inbox_path)
+        all_tasks = load_tasks(tasks_path)
     except FileNotFoundError as e:
         print(f"Error: {e}")
         return 1
 
     state = load_state()
 
-    print(f"Loaded {len(inbox_tasks)} tasks from OmniFocus Inbox")
+    print(f"Loaded {len(all_tasks)} tasks from OmniFocus (all projects + inbox)")
 
-    # Detect new (untracked) tasks
-    new_tasks = detect_new_tasks(inbox_tasks, state)
+    # Detect new (untracked) tasks across all projects
+    new_tasks = detect_new_tasks(all_tasks, state)
 
     if not new_tasks:
-        print("✓ No new inbox tasks to process")
+        print("✓ No new tasks without TaskHash found")
         return 0
 
     print(f"Found {len(new_tasks)} new task(s) without TaskHash:\n")
     for t in new_tasks:
-        parent_info = f" (parent: {t.get('parent_name')})" if t.get('parent_name') else ""
+        parent_info = f" (parent: {t.get('parent_name')})" if t.get('parent_name') else " (Inbox)"
         print(f"  • {t['name']}{parent_info}")
     print()
 
@@ -630,9 +671,9 @@ def main() -> int:
     print(f"  📍 GitHub Issue children:  {len(github_classified)} task(s)")
     for item in github_classified:
         print(f"     → Issue #{item['issue_number']}: {item['task']['name']}")
-    print(f"  📍 Vault tasks:            {len(vault_classified)} task(s)")
+    print(f"  📍 Vault Daily Note tasks: {len(vault_classified)} task(s)")
     for item in vault_classified:
-        parent_str = f" [parent: {item['parent_name']}]" if item['parent_name'] else ""
+        parent_str = f" [parent: {item['parent_name']}]" if item['parent_name'] else " [Inbox]"
         print(f"     → {item['task']['name']}{parent_str}")
     print()
 
