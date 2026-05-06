@@ -170,7 +170,9 @@ Vault Daily Note Task:
 **Scope:**
 - Issue title becomes an OmniFocus Project
 - Issue body tasks (checkboxes) become child tasks of the Project
-- Issue comments can contain additional tasks (hierarchical structure possible)
+- Issue comments with checkbox tasks (`- [ ]` format) become subtasks
+  - Comments without checkbox tasks do NOT generate metadata
+  - Only actual task-formatted content is processed
 
 **Requirements:**
 1. Issue title must include TaskHash: `"Build Mobile App (c4a2f819)"`
@@ -823,7 +825,9 @@ python3 prepare_sync.py
 
 **Process:**
 1. Fetch open GitHub Issues via `gh` CLI
-2. Parse issue bodies and comments for tasks (checkbox format)
+2. Parse issue bodies and comments for tasks (checkbox format: `- [ ] Task`)
+   - **Smart filtering**: Only comments with actual checkbox tasks are processed
+   - Comments without `- [ ]` format do NOT generate metadata
 3. Scan Vault Daily Notes (all .md files)
 4. Generate TaskHash for each new task
 5. Check sync_state.json to skip already-synced tasks
@@ -1296,7 +1300,7 @@ Completed Today:
 
 ## Implemented Features & Status
 
-### ✅ Completed (v2.5 - May 5, 2026)
+### ✅ Completed (v2.6 - May 6, 2026)
 
 - [x] Immutable TaskHash generation (CRC32)
 - [x] GitHub Issue → OmniFocus Project conversion
@@ -1310,13 +1314,15 @@ Completed Today:
 - [x] Markdown link extraction
 - [x] State management with audit trail
 - [x] Manual sync trigger via user keyword (Hook + Claude 3-step workflow)
+- [x] **Smart GitHub comment filtering** (May 6, 2026)
+  - Comments without checkbox tasks do NOT generate metadata
+  - Prevents clutter from non-task comments (discussion, links, notes)
 
 ### 📋 Future Enhancements
 
 - [ ] Optional scheduled sync (currently manual-only by design)
 - [ ] Conflict resolution (task modified in multiple systems)
 - [ ] Tag propagation (sync tags between OmniFocus and GitHub labels)
-- [ ] Comment integration (sync GitHub Issue comments to OmniFocus task notes)
 - [ ] Performance optimization for large issue sets
 - [ ] Web dashboard for sync status monitoring
 - [ ] Bulk operations (sync multiple issues at once)
@@ -1325,7 +1331,7 @@ Completed Today:
 
 ## Implementation Status
 
-### Current State (v2.5 - May 5, 2026)
+### Current State (v2.6 - May 6, 2026)
 
 #### ✅ Fully Working
 
@@ -1348,8 +1354,9 @@ No scheduled/automatic sync. Manual trigger only by design.
 
 #### ⚠️ Known Limitations
 
-1. **GitHub Comment Integration**: Partial support
-   - Status: Working but could be more robust
+1. **GitHub Comment Integration**: Smart filtering
+   - Status: ✅ Complete — Comments without checkbox tasks are skipped (May 2026)
+   - Feature: Automatically filters out non-task comments to prevent metadata clutter
 
 2. **Conflict Detection**: Not implemented
    - Status: No detection if task modified in multiple systems

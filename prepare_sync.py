@@ -337,78 +337,82 @@ def prepare_github_tasks(owner: str, repo: str, state: Dict[str, Any]) -> List[D
         # Parse and add comment tasks
         comments = issue.get('comments', [])
         if comments:
-            # Create a "Comments" parent task to hold all comment tasks
-            comments_parent_name = f"Comments (from {len(comments)} comment{'s' if len(comments) != 1 else ''})"
-            comments_source_id = make_github_source_id(owner, repo, issue_num, comments_parent_name)
-            comments_hash = compute_hash(comments_source_id)
-
-            # Only add comments parent if it doesn't already exist
-            if not is_synced(comments_hash, state):
-                comments_parent_name_with_hash = append_hash(comments_parent_name, comments_source_id)
-                print(f"  → {comments_parent_name_with_hash}")
-
-                tasks_to_add.append({
-                    "type": "task",
-                    "name": comments_parent_name_with_hash,
-                    "note": "",  # Note tracked via hash
-                    "projectName": project_name,  # Parent project
-                    "hash": comments_hash,
-                    "source_id": comments_source_id
-                })
-
-            # Add each comment's tasks as subtasks
+            # FIRST: Check if comments contain actual tasks (- [ ] format)
             comment_tasks = parse_comment_tasks(comments)
-            for comment_task_name, comment_idx, _ in comment_tasks:
-                # Extract URLs from Markdown links and clean task name
-                urls = get_markdown_urls(comment_task_name)
-                cleaned_comment_task_name = clean_markdown_links(comment_task_name)
 
-                # Determine original task name and hash
-                if has_hash(cleaned_comment_task_name):
-                    comment_task_hash = extract_hash(cleaned_comment_task_name)
-                    comment_task_original_name = cleaned_comment_task_name[:-(len(comment_task_hash) + 3)]
-                else:
-                    comment_task_original_name = cleaned_comment_task_name
+            # ONLY create Comments parent metadata if there are actual tasks to add
+            if comment_tasks:
+                # Create a "Comments" parent task to hold all comment tasks
+                comments_parent_name = f"Comments (from {len(comments)} comment{'s' if len(comments) != 1 else ''})"
+                comments_source_id = make_github_source_id(owner, repo, issue_num, comments_parent_name)
+                comments_hash = compute_hash(comments_source_id)
+
+                # Only add comments parent if it doesn't already exist
+                if not is_synced(comments_hash, state):
+                    comments_parent_name_with_hash = append_hash(comments_parent_name, comments_source_id)
+                    print(f"  → {comments_parent_name_with_hash}")
+
+                    tasks_to_add.append({
+                        "type": "task",
+                        "name": comments_parent_name_with_hash,
+                        "note": "",  # Note tracked via hash
+                        "projectName": project_name,  # Parent project
+                        "hash": comments_hash,
+                        "source_id": comments_source_id
+                    })
+
+                # Add each comment's tasks as subtasks
+                for comment_task_name, comment_idx, _ in comment_tasks:
+                    # Extract URLs from Markdown links and clean task name
+                    urls = get_markdown_urls(comment_task_name)
+                    cleaned_comment_task_name = clean_markdown_links(comment_task_name)
+
+                    # Determine original task name and hash
+                    if has_hash(cleaned_comment_task_name):
+                        comment_task_hash = extract_hash(cleaned_comment_task_name)
+                        comment_task_original_name = cleaned_comment_task_name[:-(len(comment_task_hash) + 3)]
+                    else:
+                        comment_task_original_name = cleaned_comment_task_name
+                        comment_task_source_id = make_github_source_id(
+                            owner, repo, issue_num,
+                            f"comment#{comment_idx}:{comment_task_original_name}"
+                        )
+                        comment_task_hash = compute_hash(comment_task_source_id)
+
+                    # Check if already synced
+                    if is_synced(comment_task_hash, state):
+                        print(f"    ⊘ Comment task: {cleaned_comment_task_name} - already synced")
+                        continue
+
+                    # Create source_id and task name with hash
                     comment_task_source_id = make_github_source_id(
                         owner, repo, issue_num,
                         f"comment#{comment_idx}:{comment_task_original_name}"
                     )
                     comment_task_hash = compute_hash(comment_task_source_id)
+                    comment_task_name_with_hash = append_hash(comment_task_original_name, comment_task_source_id)
 
-                # Check if already synced
-                if is_synced(comment_task_hash, state):
-                    print(f"    ⊘ Comment task: {cleaned_comment_task_name} - already synced")
-                    continue
+                    print(f"    → Comment task: {comment_task_name_with_hash}")
 
-                # Create source_id and task name with hash
-                comment_task_source_id = make_github_source_id(
-                    owner, repo, issue_num,
-                    f"comment#{comment_idx}:{comment_task_original_name}"
-                )
-                comment_task_hash = compute_hash(comment_task_source_id)
-                comment_task_name_with_hash = append_hash(comment_task_original_name, comment_task_source_id)
+                    # Build note with URLs only (source_id tracked via hash)
+                    note = "\n".join(urls) if urls else ""
 
-                print(f"    → Comment task: {comment_task_name_with_hash}")
+                    # Add comment task - as subtask of the Comments parent (using TaskHash)
+                    comment_task_dict = {
+                        "type": "task",
+                        "name": comment_task_name_with_hash,
+                        "note": note,
+                        "hash": comment_task_hash,
+                        "source_id": comment_task_source_id
+                    }
 
-                # Build note with URLs only (source_id tracked via hash)
-                note = "\n".join(urls) if urls else ""
+                    # Link to Comments parent task using TaskHash
+                    comment_task_dict["parentTaskHash"] = comments_hash
 
-                # Add comment task - as subtask of the Comments parent (using TaskHash)
-                comment_task_dict = {
-                    "type": "task",
-                    "name": comment_task_name_with_hash,
-                    "note": note,
-                    "hash": comment_task_hash,
-                    "source_id": comment_task_source_id
-                }
+                    # Also link to the project for context
+                    comment_task_dict["projectName"] = project_name
 
-                # Link to Comments parent task using TaskHash
-                comment_task_dict["parentTaskHash"] = comments_hash
-
-                # Also link to the project for context
-                comment_task_dict["projectName"] = project_name
-
-                tasks_to_add.append(comment_task_dict)
+                    tasks_to_add.append(comment_task_dict)
 
     return tasks_to_add
 
