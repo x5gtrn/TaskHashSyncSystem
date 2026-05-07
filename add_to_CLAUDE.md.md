@@ -487,10 +487,27 @@ When the user says **"sync tasks"** or equivalent command:
 
 1. **Hook fires automatically** (`.claude/hooks/skill_sync.sh`):
    - Detects the sync keyword in the user's prompt
-   - Runs `prepare_sync.py` to scan Vault + GitHub Issues for new tasks
-   - Outputs results and instructs Claude to run the full 3-step workflow
+   - Runs `prepare_sync.py` to scan Vault + GitHub Issues for new tasks and existing Issue updates
+   - Outputs results and instructs Claude to run the full workflow
 
-2. **Claude executes all 3 steps without waiting for confirmation**:
+2. **Claude executes all sync steps without waiting for confirmation**:
+
+#### STEP 0.5 — Existing Issue Updates Detection
+- Call: `detect_existing_issue_updates()` in `prepare_sync.py`
+- **Detects changes in already-synced GitHub Issues**:
+  - Finds all `github_project` entries in `sync_state.json`
+  - For each Issue, fetches current content from GitHub API
+  - Compares current tasks with synced state:
+    - **New tasks** without TaskHash detected
+    - **Deleted tasks** removed from Issue
+    - **Completion state changes** ([x] marked in GitHub but open in sync_state)
+- Generates `existing_issue_updates.json` with:
+  - `completion_changes`: Tasks that changed from open → completed in GitHub
+  - `new_tasks`: Tasks added to Issue without hashes (requires hash generation + OmniFocus creation)
+  - `deleted_tasks`: Tasks removed from Issue
+- **Output**: `existing_issue_updates.json` ready for Claude to process
+
+**Why this matters**: Ensures GitHub Issue updates (new comments, task completions) are reflected in OmniFocus without requiring full Issue re-sync. Previously, existing Issues were skipped entirely.
 
 #### STEP 1 — Forward Sync (Vault/GitHub → OmniFocus)
 - Read `tasks_to_sync.json` (output of `prepare_sync.py`)
@@ -663,10 +680,44 @@ issue_already_synced = is_synced(hash_value, state)  # → True (already synced)
 
 ### Task Name Cleaning
 
-All metadata is removed before hash calculation to ensure consistency:
-- Markdown links: `[text](url)` → extract URL to note field, use only `text` for hash
-- Due dates: `📅 YYYY-MM-DD` → removed before hash
-- Task hashes: ` (XXXXXXXX)` → removed before hash
+All metadata is removed before hash calculation to ensure consistency.
+The **single source of truth** is `clean_task_name_for_hash()` in `task_hash.py`:
+
+```python
+def clean_task_name_for_hash(task_name: str) -> str:
+    """Remove ALL metadata — call this before computing any TaskHash."""
+    cleaned = clean_markdown_links(task_name)           # [text](url) → text
+    cleaned = re.sub(r'\s+📅\s+\d{4}-\d{2}-\d{2}', '', cleaned)   # 📅 removed
+    cleaned = re.sub(r'\s+\[due::\s*\d{4}-\d{2}-\d{2}\]', '', cleaned)  # [due::] removed
+    cleaned = remove_hash(cleaned)                      # (XXXXXXXX) removed
+    return cleaned.strip()
+```
+
+Cleaning steps applied in order:
+1. **Markdown links**: `[text](url)` → `text`; URL extracted to OmniFocus note field
+2. **Due date (emoji)**: `📅 YYYY-MM-DD` → removed
+3. **Due date (bracket)**: `[due:: YYYY-MM-DD]` → removed
+4. **Existing hash**: ` (XXXXXXXX)` → removed
+
+**Example**:
+```
+Input:  "[Buy Groceries](https://store.com) 📅 2026-05-15 (a1b2c3d4)"
+Output: "Buy Groceries"
+Hash:   compute_hash("vault:path.md:Buy Groceries")
+OmniFocus:  Name: Buy Groceries (hash)
+            Note: https://store.com
+            Due:  2026-05-15
+```
+
+**Write-back behaviour** (`update_vault_files_with_hashes` in `prepare_sync.py`):
+When appending a hash to a vault line, the function searches for the task's **display text**.
+Because vault lines may use either `plain text` or `[text](url)` Markdown link syntax, the
+regex pattern matches both forms:
+```
+(- \[ \] (?:\[)?{display_text}(?:\]\([^\)\n]+\))?) ...
+```
+The `[text](url)` wrapper is preserved intact in the output. Without this, tasks written with
+Markdown link syntax would never have their hash appended to the vault file.
 
 This ensures hash stability even if task metadata changes.
 
@@ -781,6 +832,7 @@ Uses `omnifocus-local-server` MCP with these tools:
     - Inbox standalone → Add to Vault Daily Note
     - All routes must result in TaskHash assignment
 12. **No orphaned tasks**: Every task in OmniFocus must have a TaskHash and source location
+13. **OmniFocus native Project container exclusion**: Every OmniFocus Project has an identically-named first child task acting as a container (e.g., project "あとでやる - Later" has child "あとでやる - Later"). These containers MUST NEVER receive a TaskHash and MUST NEVER be added to the Vault Daily Note. Detection rule: `remove_hash(task_name).strip() == remove_hash(parent_name).strip()` → skip entirely in `scan_omnifocus_inbox.py`.
 
 ## Current Implementation Status
 

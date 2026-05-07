@@ -33,6 +33,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from task_hash import (
     append_hash,
     clean_markdown_links,
+    clean_task_name_for_hash,
     compute_hash,
     extract_hash,
     extract_markdown_links,
@@ -153,6 +154,81 @@ class TestCleanMarkdownLinks(unittest.TestCase):
     def test_mixed_link_and_plain_text(self):
         result = clean_markdown_links("Read [this article](https://example.com) today")
         self.assertEqual(result, "Read this article today")
+
+
+class TestCleanTaskNameForHash(unittest.TestCase):
+    """clean_task_name_for_hash() — single function that strips ALL metadata."""
+
+    def test_removes_markdown_link_syntax(self):
+        """[text](url) → just the display text."""
+        self.assertEqual(
+            clean_task_name_for_hash("[Buy Groceries](https://store.com)"),
+            "Buy Groceries",
+        )
+
+    def test_removes_due_date_emoji(self):
+        """📅 YYYY-MM-DD is removed."""
+        self.assertEqual(clean_task_name_for_hash("Buy milk 📅 2026-05-10"), "Buy milk")
+
+    def test_removes_due_date_bracket(self):
+        """[due:: YYYY-MM-DD] is removed."""
+        self.assertEqual(clean_task_name_for_hash("Buy milk [due:: 2026-05-10]"), "Buy milk")
+
+    def test_removes_existing_hash(self):
+        """(XXXXXXXX) suffix is removed."""
+        self.assertEqual(clean_task_name_for_hash("Buy milk (a1b2c3d4)"), "Buy milk")
+
+    def test_removes_all_metadata_combined(self):
+        """All three metadata types stripped in one call."""
+        self.assertEqual(
+            clean_task_name_for_hash(
+                "[Buy Groceries](https://store.com) 📅 2026-05-10 (a1b2c3d4)"
+            ),
+            "Buy Groceries",
+        )
+
+    def test_removes_link_and_date_no_hash(self):
+        """Link + date without a trailing hash."""
+        self.assertEqual(
+            clean_task_name_for_hash("[Task](https://example.com) 📅 2026-05-15"),
+            "Task",
+        )
+
+    def test_plain_text_unchanged(self):
+        """Task without any metadata is returned as-is."""
+        self.assertEqual(clean_task_name_for_hash("Buy milk"), "Buy milk")
+
+    def test_japanese_text_unchanged(self):
+        """Multi-byte characters survive the cleaning."""
+        self.assertEqual(clean_task_name_for_hash("牛乳を買う"), "牛乳を買う")
+
+    def test_japanese_task_with_all_metadata(self):
+        """Japanese display text inside [text](url) with date and hash."""
+        self.assertEqual(
+            clean_task_name_for_hash("[牛乳を買う](https://store.com) 📅 2026-05-10 (a1b2c3d4)"),
+            "牛乳を買う",
+        )
+
+    def test_hash_stable_across_metadata_variations(self):
+        """The hash for 'Buy Groceries' is the same regardless of surrounding metadata."""
+        sid = make_vault_source_id("Calendar/Daily/2026/05/2026-05-01.md", "Buy Groceries")
+        expected_hash = compute_hash(sid)
+
+        variants = [
+            "Buy Groceries",
+            "Buy Groceries (a1b2c3d4)",                        # already has a different hash
+            "Buy Groceries 📅 2026-05-10",
+            "[Buy Groceries](https://store.com)",
+            "[Buy Groceries](https://store.com) 📅 2026-05-10",
+        ]
+        for variant in variants:
+            cleaned = clean_task_name_for_hash(variant)
+            sid_variant = make_vault_source_id("Calendar/Daily/2026/05/2026-05-01.md", cleaned)
+            self.assertEqual(
+                compute_hash(sid_variant),
+                expected_hash,
+                msg=f"Hash changed for variant: '{variant}'",
+            )
 
 
 class TestGetMarkdownUrls(unittest.TestCase):
@@ -352,6 +428,113 @@ class TestUpdateVaultFilesWithHashes(unittest.TestCase):
         content = note.read_text(encoding="utf-8")
         # Hash should appear exactly once
         self.assertEqual(content.count("(a1b2c3d4)"), 1)
+
+
+class TestUpdateVaultFilesMarkdownLinks(unittest.TestCase):
+    """
+    Regression tests for the markdown-link bug:
+      update_vault_files_with_hashes() must write the TaskHash back to vault
+      lines that contain [text](url) Markdown link syntax.
+
+    Root cause: the function searched for the *cleaned* display text (e.g.
+    "Buy Groceries") but the vault line contained "[Buy Groceries](url)", so
+    the regex never matched and the hash was silently not written.
+    """
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.vault_root = Path(self.tmp_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir)
+
+    def _write_note(self, rel_path: str, content: str) -> Path:
+        full = self.vault_root / rel_path
+        full.parent.mkdir(parents=True, exist_ok=True)
+        full.write_text(content, encoding="utf-8")
+        return full
+
+    def test_places_hash_after_markdown_link_task(self):
+        """Hash is written to a vault line that uses [text](url) syntax."""
+        note = self._write_note(
+            "Calendar/Daily/2026/05/2026-05-01.md",
+            "## Tasks\n- [ ] [Buy Groceries](https://store.com)\n",
+        )
+        tasks = [{
+            "source_id": "vault:Calendar/Daily/2026/05/2026-05-01.md:Buy Groceries",
+            "hash": "a1b2c3d4",
+            "dueDate": None,
+        }]
+        update_vault_files_with_hashes(self.vault_root, tasks)
+        content = note.read_text(encoding="utf-8")
+        # Hash appended, markdown link syntax preserved
+        self.assertIn("[Buy Groceries](https://store.com) (a1b2c3d4)", content)
+
+    def test_markdown_link_preserved_after_hash_insertion(self):
+        """The [text](url) wrapper is NOT removed when the hash is written."""
+        note = self._write_note(
+            "Calendar/Daily/2026/05/2026-05-01.md",
+            "## Tasks\n- [ ] [Task](https://example.com)\n",
+        )
+        tasks = [{
+            "source_id": "vault:Calendar/Daily/2026/05/2026-05-01.md:Task",
+            "hash": "deadbeef",
+            "dueDate": None,
+        }]
+        update_vault_files_with_hashes(self.vault_root, tasks)
+        content = note.read_text(encoding="utf-8")
+        self.assertIn("[Task](https://example.com)", content)
+        self.assertIn("(deadbeef)", content)
+
+    def test_places_hash_after_markdown_link_with_due_date(self):
+        """Hash placed after 📅 date when the task also uses [text](url) syntax."""
+        note = self._write_note(
+            "Calendar/Daily/2026/05/2026-05-01.md",
+            "## Tasks\n- [ ] [Buy Groceries](https://store.com) 📅 2026-05-10\n",
+        )
+        tasks = [{
+            "source_id": "vault:Calendar/Daily/2026/05/2026-05-01.md:Buy Groceries",
+            "hash": "a1b2c3d4",
+            "dueDate": "2026-05-10",
+        }]
+        update_vault_files_with_hashes(self.vault_root, tasks)
+        content = note.read_text(encoding="utf-8")
+        # Expected line: - [ ] [Buy Groceries](https://store.com) 📅 2026-05-10 (a1b2c3d4)
+        self.assertIn("[Buy Groceries](https://store.com)", content)
+        self.assertIn("📅 2026-05-10 (a1b2c3d4)", content)
+
+    def test_idempotent_markdown_link_no_double_hash(self):
+        """Running update twice on a markdown-link task does not double the hash."""
+        note = self._write_note(
+            "Calendar/Daily/2026/05/2026-05-01.md",
+            "## Tasks\n- [ ] [Buy Groceries](https://store.com)\n",
+        )
+        tasks = [{
+            "source_id": "vault:Calendar/Daily/2026/05/2026-05-01.md:Buy Groceries",
+            "hash": "a1b2c3d4",
+            "dueDate": None,
+        }]
+        update_vault_files_with_hashes(self.vault_root, tasks)
+        update_vault_files_with_hashes(self.vault_root, tasks)
+        content = note.read_text(encoding="utf-8")
+        self.assertEqual(content.count("(a1b2c3d4)"), 1)
+
+    def test_complex_url_preserved(self):
+        """URL with query parameters and path is preserved intact."""
+        url = "https://example.com/path/to/page?query=value&foo=bar"
+        note = self._write_note(
+            "Calendar/Daily/2026/05/2026-05-01.md",
+            f"## Tasks\n- [ ] [Check Page]({url})\n",
+        )
+        tasks = [{
+            "source_id": "vault:Calendar/Daily/2026/05/2026-05-01.md:Check Page",
+            "hash": "cafebabe",
+            "dueDate": None,
+        }]
+        update_vault_files_with_hashes(self.vault_root, tasks)
+        content = note.read_text(encoding="utf-8")
+        self.assertIn(url, content)
+        self.assertIn("(cafebabe)", content)
 
 
 class TestPrepareVaultTasksHashInVaultNotInState(unittest.TestCase):

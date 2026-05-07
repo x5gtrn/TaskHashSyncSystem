@@ -184,6 +184,41 @@ def get_markdown_urls(text: str) -> list:
     return urls
 
 
+def clean_task_name_for_hash(task_name: str) -> str:
+    """
+    Remove ALL metadata from a task name before hash computation.
+
+    This is the single source of truth for task name normalisation.
+    Always call this function when computing a TaskHash from a raw string
+    that may contain URLs, dates, or an existing hash.
+
+    Cleaning order:
+    1. Markdown links  : [text](url) → text
+    2. Due date emoji  : 📅 YYYY-MM-DD  (removed)
+    3. Due date bracket: [due:: YYYY-MM-DD]  (removed)
+    4. Existing hash   : (XXXXXXXX)  (removed)
+
+    Example:
+        Input:  "[Buy Groceries](https://store.com) 📅 2026-05-10 (a1b2c3d4)"
+        Output: "Buy Groceries"
+
+    Args:
+        task_name: Raw task name potentially containing any combination of metadata
+
+    Returns:
+        Clean task name suitable for TaskHash generation
+    """
+    # 1. Markdown links: keep display text only
+    cleaned = clean_markdown_links(task_name)
+    # 2. Due date (emoji format): 📅 YYYY-MM-DD
+    cleaned = re.sub(r'\s+📅\s+\d{4}-\d{2}-\d{2}', '', cleaned)
+    # 3. Due date (bracket format): [due:: YYYY-MM-DD]
+    cleaned = re.sub(r'\s+\[due::\s*\d{4}-\d{2}-\d{2}\]', '', cleaned)
+    # 4. Existing TaskHash suffix: (XXXXXXXX)
+    cleaned = remove_hash(cleaned)
+    return cleaned.strip()
+
+
 if __name__ == "__main__":
     # Test examples
     print("=== Task Hash Generator Tests ===\n")

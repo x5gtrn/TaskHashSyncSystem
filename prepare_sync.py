@@ -489,16 +489,22 @@ def update_vault_files_with_hashes(vault_root: Path, vault_tasks: List[Dict[str,
 
         # For each task, append hash at END (after all metadata including due dates)
         for task_name_clean, task_hash, due_date in updates:
-            # Build pattern to find task line and append hash at END
-            # Escape task name for regex
-            task_pattern = re.escape(task_name_clean)
+            # task_name_clean is the *display* text after Markdown link removal
+            # (e.g. "Buy Groceries" for "[Buy Groceries](https://store.com)").
+            # The vault line may still contain raw [text](url) syntax, so the
+            # search pattern must match BOTH the plain-text form and the
+            # [display](url) form.
+            escaped_name = re.escape(task_name_clean)
+            # (?:\[)? and (?:\]\([^\)\n]+\))? make the markdown link brackets optional
+            task_pattern = f'(?:\\[)?{escaped_name}(?:\\]\\([^\\)\\n]+\\))?'
 
             # Pattern explanation:
-            # - Match: - [ ] {task_name} {optional due_date}
-            # - Ensure hash is not already present
+            # - Match: - [ ] {task_name | [task_name](url)} {optional due_date}
+            # - Ensure hash is not already present (trailing content after opt groups
+            #   means the regex's (\s*)$ anchor will fail on already-hashed lines)
             # - Append hash at the very end of the line
-            # Example input:  - [ ] 明日8日...準備を📅 2026-05-08
-            # Example output: - [ ] 明日8日...準備を📅 2026-05-08 (a1c1433e)
+            # Example input:  - [ ] [Buy Groceries](https://store.com) 📅 2026-05-08
+            # Example output: - [ ] [Buy Groceries](https://store.com) 📅 2026-05-08 (a1c1433e)
 
             # Build replacement with due date preservation
             due_date_part = f' 📅 {due_date}' if due_date else ''
