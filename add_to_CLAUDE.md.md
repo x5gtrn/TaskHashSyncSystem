@@ -815,6 +815,7 @@ x/Scripts/TaskHashSyncSystem/
 ├── sync_to_omnifocus.py         # Forward sync: resolves hashes, outputs precheck + batch (STEP 1)
 ├── reverse_sync.py              # Reverse sync: reflects completions to GitHub/Vault (STEP 2)
 ├── scan_omnifocus_inbox.py      # All-tasks scan: routes hashless tasks → Vault/GitHub (STEP 3)
+├── update_issue_body.py         # ⚠️ REQUIRED for ALL GitHub Issue body edits (see Operational Rules)
 ├── sync_state.json              # Sync state tracking (primary key: TaskHash)
 ├── tasks_to_sync.json           # Prepared tasks waiting for sync (output of prepare_sync.py)
 ├── precheck_requests.json       # Pre-existence checks Claude MUST run before batch_add_items
