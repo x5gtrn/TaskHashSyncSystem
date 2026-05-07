@@ -832,7 +832,11 @@ python3 prepare_sync.py
 4. Generate TaskHash for each new task
 5. Check sync_state.json to skip already-synced tasks
 6. Detect parent-child relationships via indentation
-7. Output tasks_to_sync.json
+7. **Write TaskHash back to Vault Daily Notes** (STEP 2.5)
+   - Appends hash to original task lines: `- [ ] Task (hash)`
+   - Ensures Vault and OmniFocus remain synchronized
+   - Idempotent operation (safe to re-run)
+8. Output tasks_to_sync.json
 
 **Output Example:**
 ```
@@ -1300,7 +1304,7 @@ Completed Today:
 
 ## Implemented Features & Status
 
-### ✅ Completed (v2.6 - May 6, 2026)
+### ✅ Completed (v2.7 - May 7, 2026)
 
 - [x] Immutable TaskHash generation (CRC32)
 - [x] GitHub Issue → OmniFocus Project conversion
@@ -1317,6 +1321,10 @@ Completed Today:
 - [x] **Smart GitHub comment filtering** (May 6, 2026)
   - Comments without checkbox tasks do NOT generate metadata
   - Prevents clutter from non-task comments (discussion, links, notes)
+- [x] **Vault Daily Note TaskHash write-back** (May 7, 2026)
+  - prepare_sync.py automatically appends TaskHash to Vault task lines
+  - Synchronizes Vault with OmniFocus in real-time
+  - Ensures consistency across all sync cycles
 
 ### 📋 Future Enhancements
 
@@ -1331,7 +1339,7 @@ Completed Today:
 
 ## Implementation Status
 
-### Current State (v2.6 - May 6, 2026)
+### Current State (v2.7 - May 7, 2026)
 
 #### ✅ Fully Working
 

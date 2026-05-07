@@ -417,6 +417,82 @@ def prepare_github_tasks(owner: str, repo: str, state: Dict[str, Any]) -> List[D
     return tasks_to_add
 
 
+def update_vault_files_with_hashes(vault_root: Path, vault_tasks: List[Dict[str, Any]]) -> None:
+    """
+    Update Vault Daily Note files by appending TaskHash to newly-scanned tasks.
+
+    Purpose: Ensure Vault and OmniFocus stay synchronized with TaskHash in task names.
+
+    Process:
+    1. Build map of file_path → [(task_name, hash), ...]
+    2. For each file, find tasks without hash and append it
+    3. Write updated content back to file (idempotent)
+    """
+    # Build file update map from vault_tasks
+    file_updates = {}
+
+    for task in vault_tasks:
+        source_id = task.get('source_id', '')
+        task_hash = task.get('hash')
+
+        if source_id.startswith('vault:') and task_hash:
+            # Parse source_id: vault:relative/path.md:task_name
+            parts = source_id.split(':', 2)
+            if len(parts) >= 3:
+                file_rel_path = parts[1]
+                task_name_clean = parts[2]
+
+                if file_rel_path not in file_updates:
+                    file_updates[file_rel_path] = []
+                file_updates[file_rel_path].append((task_name_clean, task_hash))
+
+    if not file_updates:
+        return  # No updates needed
+
+    # Update each file
+    for file_rel_path, updates in file_updates.items():
+        full_path = vault_root / file_rel_path
+
+        if not full_path.exists():
+            continue
+
+        try:
+            with open(full_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except Exception as e:
+            print(f"⚠️  Could not read {file_rel_path} for hash update: {e}", file=sys.stderr)
+            continue
+
+        # Track if file was modified
+        original_content = content
+
+        # For each task, append hash if not already present
+        for task_name_clean, task_hash in updates:
+            # Build pattern to find task line with optional dates/emojis
+            # Match: - [ ] task_name (may have 📅 date or other metadata)
+            # Only replace if hash not already present
+
+            # Escape task name for regex
+            task_pattern = re.escape(task_name_clean)
+
+            # Pattern: - [ ] {task_name} {optional trailing metadata} (not already hash)
+            # Example: - [ ] 9日土曜日午前にクリニックに必ず行く📅 2026-05-09
+            # Match: - [ ] {start} {optional: 📅, date, emoji, etc} {optional: trailing}
+            pattern = f'(- \\[ \\] {task_pattern})((?:\\s+[📅🎯\\[\\]\\d\\-:]+)*)(\\s*)(?!\\({task_hash}\\))'
+            replacement = f'\\1 ({task_hash})\\2\\3'
+
+            content = re.sub(pattern, replacement, content)
+
+        # Write back if modified
+        if content != original_content:
+            try:
+                with open(full_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                print(f"  ✓ Updated {file_rel_path} with TaskHashes")
+            except Exception as e:
+                print(f"⚠️  Could not write {file_rel_path}: {e}", file=sys.stderr)
+
+
 def find_vault_files(vault_root: Path) -> List[Path]:
     """Find all markdown files in Calendar folder only.
 
@@ -716,10 +792,17 @@ def main():
         all_tasks.extend(github_tasks)
 
     # STEP 2: Prepare Vault tasks
+    vault_tasks = []
     if args.vault_root.exists():
         print("\n[STEP 2: Scanning Vault Files]")
         vault_tasks = prepare_vault_tasks(args.vault_root, state)
         all_tasks.extend(vault_tasks)
+
+        # STEP 2.5: Update Vault files with generated TaskHashes
+        # This writes TaskHash back to the original Daily Note files
+        if vault_tasks:
+            print("\n[STEP 2.5: Writing TaskHashes back to Vault Files]")
+            update_vault_files_with_hashes(args.vault_root, vault_tasks)
 
     # Save to file for Claude to process
     with open(PREPARE_FILE, 'w') as f:

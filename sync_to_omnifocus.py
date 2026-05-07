@@ -114,9 +114,19 @@ def validate_tasks(resolved_tasks: List[Dict[str, Any]], verbose: bool = False) 
                 errors.append(f"Task {i}: name '{task['name']}' missing hash format (hash)")
 
         # Check projectName for tasks (if parent not specified)
+        # EXCEPTION: Vault Inbox tasks (source_id contains "vault:") can have no projectName
+        # → they are added directly to OmniFocus Inbox
         if task.get('type') == 'task':
-            if 'projectName' not in task and 'parentTaskId' not in task:
-                errors.append(f"Task {i}: task '{task.get('name')}' has no projectName or parentTaskId")
+            is_github_task = task.get('source_id', '').startswith('github:')
+            is_vault_task = task.get('source_id', '').startswith('vault:')
+
+            if is_github_task:
+                # GitHub tasks MUST have projectName (parent Issue/Project)
+                if 'projectName' not in task and 'parentTaskId' not in task:
+                    errors.append(f"Task {i}: GitHub task '{task.get('name')}' has no projectName or parentTaskId")
+            elif is_vault_task and 'projectName' not in task and 'parentTaskId' not in task:
+                # Vault Inbox tasks are OK without projectName (added directly to Inbox)
+                pass
 
     if verbose and not errors:
         print("✓ All tasks passed validation")
