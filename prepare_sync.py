@@ -995,6 +995,17 @@ def prepare_vault_tasks(
                         })
                     print(f"  ⊘ {cleaned_task_name} - already synced")
                     continue
+                # BUG FIX: Hash present in Vault but NOT in sync_state.
+                # This happens when a previous prepare_sync run wrote the hash
+                # to the Vault file but crashed (or was interrupted) before
+                # updating sync_state.json.  Reuse the existing hash so the
+                # Vault file stays unchanged; treat the task as new.
+                clean_name = remove_hash(cleaned_task_name).strip()
+                source_id = make_vault_source_id(str(file_path), clean_name)
+                if not task_hash:
+                    task_hash = compute_hash(source_id)
+                task_name_with_hash = cleaned_task_name  # hash already in Vault
+                print(f"  → {task_name_with_hash} (hash in Vault but missing from sync_state)")
             else:
                 source_id = make_vault_source_id(str(file_path), cleaned_task_name)
                 task_hash = compute_hash(source_id)
@@ -1013,36 +1024,36 @@ def prepare_vault_tasks(
                     continue
 
                 task_name_with_hash = append_hash(cleaned_task_name, source_id)
-
                 print(f"  → {task_name_with_hash}")
 
-                # Build note with URLs only (source_id tracked via hash)
-                note = "\n".join(urls) if urls else ""
+            # ── Shared path: add task to the output list ──────────────────────
+            # Build note with URLs only (source_id tracked via hash)
+            note = "\n".join(urls) if urls else ""
 
-                # Prepare task dict — include parentTaskHash for nested Vault tasks
-                task_dict = {
-                    "type": "task",
-                    "name": task_name_with_hash,
-                    "note": note,
-                    "hash": task_hash,
-                    "source_id": source_id
-                }
+            # Prepare task dict — include parentTaskHash for nested Vault tasks
+            task_dict = {
+                "type": "task",
+                "name": task_name_with_hash,
+                "note": note,
+                "hash": task_hash,
+                "source_id": source_id
+            }
 
-                # Add due date if present
-                if due_date:
-                    task_dict["dueDate"] = due_date
+            # Add due date if present
+            if due_date:
+                task_dict["dueDate"] = due_date
 
-                # Resolve parent task hash for hierarchical Vault tasks
-                if parent_task:
-                    parent_cleaned = clean_markdown_links(parent_task)
-                    parent_cleaned = re.sub(r'\s+📅\s+\d{4}-\d{2}-\d{2}', '', parent_cleaned).strip()
-                    parent_cleaned = re.sub(r'\s+\[due::\s*\d{4}-\d{2}-\d{2}\]', '', parent_cleaned).strip()
-                    parent_hash = task_name_to_hash.get(parent_cleaned)
-                    if parent_hash:
-                        task_dict["parentTaskHash"] = parent_hash
+            # Resolve parent task hash for hierarchical Vault tasks
+            if parent_task:
+                parent_cleaned = clean_markdown_links(parent_task)
+                parent_cleaned = re.sub(r'\s+📅\s+\d{4}-\d{2}-\d{2}', '', parent_cleaned).strip()
+                parent_cleaned = re.sub(r'\s+\[due::\s*\d{4}-\d{2}-\d{2}\]', '', parent_cleaned).strip()
+                parent_hash = task_name_to_hash.get(parent_cleaned)
+                if parent_hash:
+                    task_dict["parentTaskHash"] = parent_hash
 
-                # Add task
-                tasks_to_add.append(task_dict)
+            # Add task
+            tasks_to_add.append(task_dict)
 
     return tasks_to_add, due_date_updates
 

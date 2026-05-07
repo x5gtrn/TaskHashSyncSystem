@@ -202,6 +202,7 @@ class TestExtractMarkdownLinks(unittest.TestCase):
 from prepare_sync import (
     extract_due_date,
     extract_tasks,
+    prepare_vault_tasks,
     update_vault_files_with_hashes,
 )
 
@@ -351,6 +352,125 @@ class TestUpdateVaultFilesWithHashes(unittest.TestCase):
         content = note.read_text(encoding="utf-8")
         # Hash should appear exactly once
         self.assertEqual(content.count("(a1b2c3d4)"), 1)
+
+
+class TestPrepareVaultTasksHashInVaultNotInState(unittest.TestCase):
+    """
+    Regression tests for the silent-skip bug:
+      When a task already has a hash written in the Vault file but that hash
+      is absent from sync_state.json, prepare_vault_tasks() used to fall
+      through both branches and silently drop the task (neither "already
+      synced" nor added to the output list).
+
+    Fixed behaviour: the task IS included in the output so it can be synced
+    to OmniFocus.
+    """
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.vault_root = Path(self.tmp_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir)
+
+    def _write_note(self, rel_path: str, content: str) -> Path:
+        full = self.vault_root / rel_path
+        full.parent.mkdir(parents=True, exist_ok=True)
+        full.write_text(content, encoding="utf-8")
+        return full
+
+    # ── Core regression ───────────────────────────────────────────────────────
+
+    def test_hash_in_vault_not_in_state_is_returned_as_new(self):
+        """
+        A task whose hash is already written in the Vault but is absent from
+        sync_state must appear in the returned task list.  This is the exact
+        scenario that was silently dropped before the fix.
+        """
+        # Hash value matches CRC32 of source_id for '期限テスト3'
+        self._write_note(
+            "Calendar/Daily/2026/05/2026-05-07.md",
+            "## Tasks\n- [ ] 期限テスト3 (4b1d22d0)\n",
+        )
+        tasks, _ = prepare_vault_tasks(self.vault_root, state={})
+        self.assertEqual(len(tasks), 1)
+        self.assertIn("4b1d22d0", tasks[0]["name"])
+
+    def test_hash_in_vault_with_due_date_not_in_state_is_returned(self):
+        """Hash + due date in Vault, not in state → returned with dueDate field."""
+        self._write_note(
+            "Calendar/Daily/2026/05/2026-05-07.md",
+            "## Tasks\n- [ ] 期限テスト3 📅 2026-05-12 (4b1d22d0)\n",
+        )
+        tasks, _ = prepare_vault_tasks(self.vault_root, state={})
+        self.assertEqual(len(tasks), 1)
+        task = tasks[0]
+        self.assertIn("4b1d22d0", task["name"])
+        self.assertEqual(task.get("dueDate"), "2026-05-12")
+
+    def test_hash_in_vault_and_in_state_is_skipped(self):
+        """When the hash IS in sync_state the task must be skipped (already synced)."""
+        source_id = "vault:Calendar/Daily/2026/05/2026-05-07.md:期限テスト3"
+        h = compute_hash(source_id)
+        self._write_note(
+            "Calendar/Daily/2026/05/2026-05-07.md",
+            f"## Tasks\n- [ ] 期限テスト3 ({h})\n",
+        )
+        state = {h: {"source_id": source_id, "of_task_id": "abc", "status": "open"}}
+        tasks, _ = prepare_vault_tasks(self.vault_root, state=state)
+        self.assertEqual(tasks, [], "Task already in sync_state must not be re-added")
+
+    # ── Hash field integrity ──────────────────────────────────────────────────
+
+    def test_returned_task_hash_matches_vault_hash(self):
+        """The hash in the returned dict matches the one written in the Vault."""
+        self._write_note(
+            "Calendar/Daily/2026/05/2026-05-07.md",
+            "## Tasks\n- [ ] 期限テスト3 (4b1d22d0)\n",
+        )
+        tasks, _ = prepare_vault_tasks(self.vault_root, state={})
+        self.assertEqual(tasks[0]["hash"], "4b1d22d0")
+
+    def test_returned_task_name_unchanged_from_vault(self):
+        """The task name returned must equal what is already in the Vault."""
+        self._write_note(
+            "Calendar/Daily/2026/05/2026-05-07.md",
+            "## Tasks\n- [ ] 期限テスト3 (4b1d22d0)\n",
+        )
+        tasks, _ = prepare_vault_tasks(self.vault_root, state={})
+        self.assertEqual(tasks[0]["name"], "期限テスト3 (4b1d22d0)")
+
+    # ── Coexistence with normal (no-hash) tasks ───────────────────────────────
+
+    def test_mixed_note_hash_and_no_hash_tasks(self):
+        """
+        A file with one already-hashed task and one plain task:
+        both must be returned (hash-in-vault is treated as new,
+        plain task gets a fresh hash).
+        """
+        self._write_note(
+            "Calendar/Daily/2026/05/2026-05-07.md",
+            "## Tasks\n"
+            "- [ ] 期限テスト3 (4b1d22d0)\n"
+            "- [ ] Buy coffee\n",
+        )
+        tasks, _ = prepare_vault_tasks(self.vault_root, state={})
+        self.assertEqual(len(tasks), 2)
+        names = {t["name"] for t in tasks}
+        self.assertTrue(any("4b1d22d0" in n for n in names))
+        self.assertTrue(any("Buy coffee" in n for n in names))
+
+    def test_source_id_uses_clean_name_without_hash(self):
+        """source_id must be computed from the task name *without* the hash suffix."""
+        self._write_note(
+            "Calendar/Daily/2026/05/2026-05-07.md",
+            "## Tasks\n- [ ] 期限テスト3 (4b1d22d0)\n",
+        )
+        tasks, _ = prepare_vault_tasks(self.vault_root, state={})
+        source_id = tasks[0]["source_id"]
+        # Must NOT contain the hash inside the name part
+        self.assertNotIn("4b1d22d0", source_id)
+        self.assertIn("期限テスト3", source_id)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
