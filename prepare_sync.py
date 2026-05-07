@@ -468,20 +468,33 @@ def update_vault_files_with_hashes(vault_root: Path, vault_tasks: List[Dict[str,
 
         # For each task, append hash if not already present
         for task_name_clean, task_hash in updates:
-            # Build pattern to find task line with optional dates/emojis
-            # Match: - [ ] task_name (may have 📅 date or other metadata)
-            # Only replace if hash not already present
-
+            # Build pattern to find task line and append hash at END (after all metadata)
             # Escape task name for regex
             task_pattern = re.escape(task_name_clean)
 
-            # Pattern: - [ ] {task_name} {optional trailing metadata} (not already hash)
-            # Example: - [ ] 9日土曜日午前にクリニックに必ず行く📅 2026-05-09
-            # Match: - [ ] {start} {optional: 📅, date, emoji, etc} {optional: trailing}
-            pattern = f'(- \\[ \\] {task_pattern})((?:\\s+[📅🎯\\[\\]\\d\\-:]+)*)(\\s*)(?!\\({task_hash}\\))'
-            replacement = f'\\1 ({task_hash})\\2\\3'
+            # Pattern explanation:
+            # - Match: - [ ] {task_name} {optional metadata: dates, emojis, etc}
+            # - Ensure hash is not already present
+            # - Append hash at the very end of the line
+            # Example input:  - [ ] 明日8日...準備を📅 2026-05-08
+            # Example output: - [ ] 明日8日...準備を📅 2026-05-08 (8cf639fa)
 
-            content = re.sub(pattern, replacement, content)
+            pattern = f'(- \\[ \\] {task_pattern}(?:\\s+[📅🎯\\[\\]\\d\\-:]*)?)(\\s*)$'
+
+            # Only replace if hash not already at end
+            if re.search(pattern, content, re.MULTILINE):
+                content = re.sub(
+                    pattern,
+                    f'\\1 ({task_hash})',
+                    content,
+                    flags=re.MULTILINE
+                )
+                # Remove duplicate hash if somehow present
+                content = re.sub(
+                    f'(- \\[ \\] {task_pattern}.*)\\s+\\({task_hash}\\)\\s+\\({task_hash}\\)',
+                    f'\\1 ({task_hash})',
+                    content
+                )
 
         # Write back if modified
         if content != original_content:
