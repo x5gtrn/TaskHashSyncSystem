@@ -146,7 +146,7 @@ Vault Daily Note Task:
 | File | Purpose |
 |------|---------|
 | `task_hash.py` | TaskHash generation and utilities (core library) |
-| `prepare_sync.py` | Scan GitHub Issues + Vault; generate TaskHashes; output tasks_to_sync.json |
+| `prepare_sync.py` | Scan GitHub Issues + Vault; detect changes in existing Issues; generate TaskHashes; output tasks_to_sync.json + existing_issue_updates.json |
 | `sync_to_omnifocus.py` | Resolve parentTaskHash → parentTaskId; validate; output mcp_batch_add_request.json |
 | `update_sync_state.py` | Update sync_state.json after MCP execution |
 | `reverse_sync.py` | Sync completed tasks from OmniFocus back to GitHub/Vault |
@@ -155,6 +155,7 @@ Vault Daily Note Task:
 | `test_system.py` | Test suite for validating system components |
 | `sync_state.json` | Central sync state database (TaskHash → OmniFocus ID mapping) |
 | `tasks_to_sync.json` | Queue: output of prepare_sync.py, consumed by sync_to_omnifocus.py |
+| `existing_issue_updates.json` | Output: changes detected in existing GitHub Issues (new_tasks, completion_changes, deleted_tasks) |
 | `tasks_resolved.json` | Intermediate: parentTaskHash resolved to parentTaskId |
 | `mcp_batch_add_request.json` | Formatted MCP batch_add_items request for Claude |
 | `precheck_requests.json` | Existence checks Claude MUST run (get_task_by_id) before batch_add_items |
@@ -449,6 +450,69 @@ INBOX:
    # Output: ✓ Prepared 0 tasks for sync
    # (All tasks already synced - proves idempotence)
    ```
+
+### Workflow A.5: Detect Changes in Existing GitHub Issues
+
+**Goal:** Detect and sync changes made to already-synced GitHub Issues (task completions, new tasks, deletions)
+
+**Scenario:** Issue #2 was synced months ago, but recently:
+- Three tasks were marked complete in GitHub [x]
+- Two new tasks were added (without TaskHashes yet)
+- One old task was removed
+
+**Detection Process:**
+
+1. **Run prepare_sync.py** (automatically done via hook)
+   ```bash
+   python3 prepare_sync.py
+   ```
+
+2. **STEP 0.5 Executes Automatically**
+   - Scans `sync_state.json` for all `github_project` entries
+   - For Issue #2 (hash: `60c6d084`):
+     - Fetches current Issue body from GitHub
+     - Compares current tasks with synced state
+     - **Detects**:
+       - 3 tasks marked [x] in GitHub (previously open in OmniFocus)
+       - 2 new tasks without hashes (new work added)
+       - 0 deleted tasks
+
+3. **Output: existing_issue_updates.json**
+   ```json
+   {
+     "updates": [
+       {
+         "issue_num": 2,
+         "project_hash": "60c6d084",
+         "new_tasks": [
+           {
+             "name": "Task without hash (abcd1234)",
+             "hash": "abcd1234",
+             "source_id": "github:x5gtrn/LIFE#2:Task without hash"
+           }
+         ],
+         "completion_changes": [
+           {
+             "hash": "35efa56a",
+             "previous_status": "open",
+             "new_status": "completed"
+           }
+         ],
+         "deleted_tasks": []
+       }
+     ]
+   }
+   ```
+
+4. **Claude Action (Manual or Automated)**
+   - Reads `existing_issue_updates.json`
+   - Updates OmniFocus:
+     - Mark completed tasks as complete (via `edit_item`)
+     - Add new tasks to Project (via `batch_add_items`)
+     - Handle deleted tasks (if needed)
+   - Updates sync_state.json
+
+**Key Benefit:** Without this detection, GitHub Issue updates would require full re-sync or manual intervention. Now changes are automatically detected and queued for sync.
 
 ### Workflow B: Add Tasks to Existing Issue
 

@@ -211,6 +211,17 @@ def detect_new_tasks(inbox_tasks: List[Dict], state: Dict[str, Any]) -> List[Dic
         if has_hash(name):
             continue
 
+        # Skip Project container tasks (OmniFocus pattern: task name == project name).
+        # Every OmniFocus Project has an identically-named first child that acts as a
+        # container; it must NEVER receive a TaskHash or appear in the Vault Daily Note.
+        # Detection: remove_hash(task_name).strip() == remove_hash(parent_name).strip()
+        parent_name = task.get("parent_name", "")
+        if parent_name:
+            task_clean = remove_hash(name).strip()
+            parent_clean = remove_hash(parent_name).strip()
+            if task_clean == parent_clean:
+                continue  # This is a container task, not real work
+
         # Skip if base name is already tracked in state
         clean_name = remove_hash(name).strip()
         if clean_name in tracked_names:

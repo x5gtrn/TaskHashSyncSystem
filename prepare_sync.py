@@ -101,6 +101,25 @@ def parse_subtasks(body: Optional[str]) -> List[str]:
     return [match.strip() for match in matches]
 
 
+def parse_subtasks_with_state(body: Optional[str]) -> List[tuple]:
+    """
+    Parse subtasks from issue body with checkbox state.
+
+    Returns:
+        List of tuples: (is_completed, task_name)
+        is_completed: True if [x], False if [ ]
+    """
+    if not body:
+        return []
+    tasks = []
+    pattern = r'- \[([x ])\]\s*(.+?)(?:\n|$)'
+    matches = re.findall(pattern, body)
+    for checkbox, task_name in matches:
+        is_completed = checkbox == 'x'
+        tasks.append((is_completed, task_name.strip()))
+    return tasks
+
+
 def parse_comment_tasks(comments: List[Dict[str, Any]]) -> List[tuple]:
     """
     Parse tasks from issue comments.
@@ -422,10 +441,11 @@ def update_vault_files_with_hashes(vault_root: Path, vault_tasks: List[Dict[str,
     Update Vault Daily Note files by appending TaskHash to newly-scanned tasks.
 
     Purpose: Ensure Vault and OmniFocus stay synchronized with TaskHash in task names.
+    Also preserves due dates in the correct format.
 
     Process:
-    1. Build map of file_path → [(task_name, hash), ...]
-    2. For each file, find tasks without hash and append it
+    1. Build map of file_path → [(task_name, hash, due_date), ...]
+    2. For each file, find tasks without hash and append it (preserving due date)
     3. Write updated content back to file (idempotent)
     """
     # Build file update map from vault_tasks
@@ -434,6 +454,7 @@ def update_vault_files_with_hashes(vault_root: Path, vault_tasks: List[Dict[str,
     for task in vault_tasks:
         source_id = task.get('source_id', '')
         task_hash = task.get('hash')
+        due_date = task.get('dueDate')
 
         if source_id.startswith('vault:') and task_hash:
             # Parse source_id: vault:relative/path.md:task_name
@@ -444,7 +465,7 @@ def update_vault_files_with_hashes(vault_root: Path, vault_tasks: List[Dict[str,
 
                 if file_rel_path not in file_updates:
                     file_updates[file_rel_path] = []
-                file_updates[file_rel_path].append((task_name_clean, task_hash))
+                file_updates[file_rel_path].append((task_name_clean, task_hash, due_date))
 
     if not file_updates:
         return  # No updates needed
@@ -466,26 +487,30 @@ def update_vault_files_with_hashes(vault_root: Path, vault_tasks: List[Dict[str,
         # Track if file was modified
         original_content = content
 
-        # For each task, append hash if not already present
-        for task_name_clean, task_hash in updates:
-            # Build pattern to find task line and append hash at END (after all metadata)
+        # For each task, append hash at END (after all metadata including due dates)
+        for task_name_clean, task_hash, due_date in updates:
+            # Build pattern to find task line and append hash at END
             # Escape task name for regex
             task_pattern = re.escape(task_name_clean)
 
             # Pattern explanation:
-            # - Match: - [ ] {task_name} {optional metadata: dates, emojis, etc}
+            # - Match: - [ ] {task_name} {optional due_date}
             # - Ensure hash is not already present
             # - Append hash at the very end of the line
             # Example input:  - [ ] 明日8日...準備を📅 2026-05-08
-            # Example output: - [ ] 明日8日...準備を📅 2026-05-08 (8cf639fa)
+            # Example output: - [ ] 明日8日...準備を📅 2026-05-08 (a1c1433e)
 
-            pattern = f'(- \\[ \\] {task_pattern}(?:\\s+[📅🎯\\[\\]\\d\\-:]*)?)(\\s*)$'
+            # Build replacement with due date preservation
+            due_date_part = f' 📅 {due_date}' if due_date else ''
+
+            pattern = f'(- \\[ \\] {task_pattern})(?:\\s+📅\\s+\\d{{4}}-\\d{{2}}-\\d{{2}})?(?:\\s+\\[due::\\s*\\d{{4}}-\\d{{2}}-\\d{{2}}\\])?(\\s*)$'
 
             # Only replace if hash not already at end
             if re.search(pattern, content, re.MULTILINE):
+                replacement = f'\\1{due_date_part} ({task_hash})'
                 content = re.sub(
                     pattern,
-                    f'\\1 ({task_hash})',
+                    replacement,
                     content,
                     flags=re.MULTILINE
                 )
@@ -527,6 +552,37 @@ def find_vault_files(vault_root: Path) -> List[Path]:
     return sorted(markdown_files)
 
 
+def extract_due_date(task_name: str) -> tuple:
+    """
+    Extract due date from task name.
+
+    Returns: (task_name_without_date, due_date_string)
+
+    Formats supported:
+    - 📅 YYYY-MM-DD
+    - [due:: YYYY-MM-DD]
+
+    Example:
+        Input:  "Buy milk 📅 2026-05-10"
+        Output: ("Buy milk", "2026-05-10")
+    """
+    # Try emoji format first: 📅 YYYY-MM-DD
+    emoji_match = re.search(r'\s+📅\s+(\d{4}-\d{2}-\d{2})', task_name)
+    if emoji_match:
+        date_str = emoji_match.group(1)
+        clean_name = task_name[:emoji_match.start()] + task_name[emoji_match.end():]
+        return (clean_name.strip(), date_str)
+
+    # Try bracket format: [due:: YYYY-MM-DD]
+    bracket_match = re.search(r'\s+\[due::\s*(\d{4}-\d{2}-\d{2})\]', task_name)
+    if bracket_match:
+        date_str = bracket_match.group(1)
+        clean_name = task_name[:bracket_match.start()] + task_name[bracket_match.end():]
+        return (clean_name.strip(), date_str)
+
+    return (task_name, None)
+
+
 def is_section_header_line(line: str) -> bool:
     """
     Check if a line is a markdown section header (not a task).
@@ -544,7 +600,11 @@ def is_section_header_line(line: str) -> bool:
 
 
 def extract_tasks(file_path: Path, file_content: str) -> List[tuple]:
-    """Extract unchecked tasks from markdown file content with parent info."""
+    """
+    Extract unchecked tasks from markdown file content with parent info and due dates.
+
+    Returns: List of (task_name_clean, line_num, indent_level, parent_task, due_date)
+    """
     tasks = []
     lines = file_content.split('\n')
 
@@ -567,8 +627,14 @@ def extract_tasks(file_path: Path, file_content: str) -> List[tuple]:
             indent_str = indent_match.group(1)
             task_name = indent_match.group(2).strip()
 
-            # Skip empty tasks or metadata-only lines
-            if not task_name or task_name.startswith('(') or task_name.startswith('['):
+            # Skip empty tasks or metadata-only lines.
+            # Note: do NOT skip tasks that start with '[' — they may be valid Markdown
+            # link tasks like "[Buy Groceries](https://store.com)".  The URL is extracted
+            # later by get_markdown_urls / clean_markdown_links.
+            if not task_name or task_name.startswith('('):
+                continue
+            # Skip lines that are *solely* a bracket-metadata annotation (no link URL)
+            if task_name.startswith('[') and not re.search(r'\]\s*\(', task_name):
                 continue
 
             # Skip lines that look like metadata (e.g., "Projects (no TaskHash) - excluded from sync:")
@@ -582,9 +648,11 @@ def extract_tasks(file_path: Path, file_content: str) -> List[tuple]:
             else:
                 indent_level = len(indent_str) // 2
 
-            # Remove due date emoji and date from task name for hash generation
-            task_name_for_hash = re.sub(r'\s+📅\s+\d{4}-\d{2}-\d{2}', '', task_name)
-            task_name_for_hash = re.sub(r'\s+\[due::\s*\d{4}-\d{2}-\d{2}\]', '', task_name_for_hash)
+            # Extract due date from task name
+            task_name_clean, due_date = extract_due_date(task_name)
+
+            # Use clean name (without date) for hash generation
+            task_name_for_hash = task_name_clean
 
             # Update parent stack based on indent level
             # Remove parents with same or higher indent level
@@ -597,7 +665,7 @@ def extract_tasks(file_path: Path, file_content: str) -> List[tuple]:
             # Add to stack for future children
             parent_stack.append((indent_level, task_name_for_hash))
 
-            tasks.append((task_name_for_hash, line_num, indent_level, parent_task))
+            tasks.append((task_name_for_hash, line_num, indent_level, parent_task, due_date))
 
     return tasks
 
@@ -646,9 +714,208 @@ def is_project_name_task(task_name: str, content: str, file_path: Path) -> bool:
     return False
 
 
-def prepare_vault_tasks(vault_root: Path, state: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Prepare Vault tasks for sync."""
+def detect_existing_issue_updates(owner: str, repo: str, state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    STEP 0.5: Detect changes in existing synced GitHub Issues.
+
+    This function:
+    1. Finds all github_project entries in sync_state
+    2. Fetches current Issue content from GitHub
+    3. Compares with synced task state
+    4. Detects new tasks, deleted tasks, completion state changes
+    5. Generates update instructions for OmniFocus
+
+    Returns:
+        List of update instructions for existing Issues
+    """
+    print("Detecting changes in existing synced GitHub Issues...")
+
+    if not state:
+        return []
+
+    # Find all github_project entries
+    # Key by hash (not issue_num) so parent_task_hash lookups work
+    github_projects = {}
+    for hash_val, entry in state.items():
+        if entry.get('task_type') == 'github_project':
+            source_id = entry.get('source_id', '')
+            # source_id format: github:owner/repo#issue_num:Issue Title
+            match = re.search(r'github:.+?#(\d+):', source_id)
+            if match:
+                issue_num = int(match.group(1))
+                github_projects[hash_val] = {  # Key by hash, not issue_num
+                    'hash': hash_val,
+                    'issue_num': issue_num,
+                    'entry': entry,
+                    'synced_tasks': []
+                }
+
+    if not github_projects:
+        print("No existing GitHub projects found")
+        return []
+
+
+    # Collect synced child tasks for each project
+    for hash_val, entry in state.items():
+        if entry.get('task_type') == 'github_task':
+            parent_hash = entry.get('parent_task_hash')
+            # Skip debug output
+            if parent_hash in github_projects:
+                github_projects[parent_hash]['synced_tasks'].append({
+                    'hash': hash_val,
+                    'name': entry.get('of_task_name', ''),
+                    'status': entry.get('status')
+                })
+
+    all_updates = []
+
+    # Check each project for updates
+    for project_hash, project_info in github_projects.items():
+        issue_num = project_info['issue_num']
+        try:
+            # Fetch current Issue content
+            cmd = [
+                'gh', 'issue', 'view', str(issue_num),
+                '--repo', f'{owner}/{repo}',
+                '--json', 'body'
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            issue_data = json.loads(result.stdout)
+            current_body = issue_data.get('body', '')
+
+            # Parse current tasks from Issue body WITH checkbox state
+            current_tasks_with_state = parse_subtasks_with_state(current_body)
+
+            # Extract hashes from synced tasks
+            synced_hashes = {}  # hash -> {name, status}
+            for task in project_info['synced_tasks']:
+                hash_match = re.search(r'\(([a-f0-9]{8})\)', task['name'])
+                if hash_match:
+                    task_hash = hash_match.group(1)
+                    synced_hashes[task_hash] = {
+                        'name': task['name'],
+                        'status': task['status']
+                    }
+
+            # Extract hashes from current tasks with completion state
+            current_hashes = {}  # hash -> {is_completed, task_text}
+            tasks_without_hash = []  # Track tasks that don't have hashes
+            for is_completed, task_text in current_tasks_with_state:
+                hash_match = re.search(r'\(([a-f0-9]{8})\)', task_text)
+                if hash_match:
+                    task_hash = hash_match.group(1)
+                    current_hashes[task_hash] = {
+                        'is_completed': is_completed,
+                        'task_text': task_text
+                    }
+                else:
+                    # Track tasks without hashes for new task generation
+                    tasks_without_hash.append({
+                        'is_completed': is_completed,
+                        'task_text': task_text
+                    })
+
+            # Detect changes
+            new_hashes = set(current_hashes.keys()) - set(synced_hashes.keys())
+            deleted_hashes = set(synced_hashes.keys()) - set(current_hashes.keys())
+
+            # Detect completion state changes for existing tasks
+            completion_changes = []
+            for task_hash in synced_hashes:
+                if task_hash in current_hashes:
+                    synced_status = synced_hashes[task_hash]['status']
+                    is_completed_now = current_hashes[task_hash]['is_completed']
+
+                    # Check if completion state changed
+                    was_completed = synced_status == 'completed'
+                    if is_completed_now != was_completed:
+                        completion_changes.append({
+                            'hash': task_hash,
+                            'previous_status': synced_status,
+                            'new_status': 'completed' if is_completed_now else 'incomplete'
+                        })
+
+            total_new_tasks = len(new_hashes) + len(tasks_without_hash)
+            if total_new_tasks or deleted_hashes or completion_changes:
+                print(f"\n✓ Issue #{issue_num}: {total_new_tasks} new tasks, {len(deleted_hashes)} deleted, {len(completion_changes)} completion state changes")
+
+                project_hash = project_info['hash']
+
+                # Generate update instruction
+                update_info = {
+                    'issue_num': issue_num,
+                    'project_hash': project_hash,
+                    'new_tasks': [],
+                    'deleted_tasks': list(deleted_hashes),
+                    'completion_changes': completion_changes,
+                    'current_body': current_body
+                }
+
+                # Process new tasks with hashes
+                for new_hash in new_hashes:
+                    task_text = current_hashes[new_hash]['task_text']
+                    task_name = clean_markdown_links(task_text)
+                    task_name = task_name.replace(f'({new_hash})', '').strip()
+
+                    # Check if task needs a new hash (if it doesn't have one yet in current form)
+                    if not re.search(r'\([a-f0-9]{8}\)', task_text):
+                        # Generate hash for new task
+                        source_id = make_github_source_id(owner, repo, issue_num, task_name)
+                        hash_val = compute_hash(source_id)
+                        task_name = append_hash(task_name, hash_val)
+                    else:
+                        # Task already has hash
+                        hash_val = new_hash
+
+                    update_info['new_tasks'].append({
+                        'name': task_name,
+                        'hash': hash_val,
+                        'source_id': make_github_source_id(owner, repo, issue_num, task_name.replace(f'({hash_val})', '').strip())
+                    })
+
+                # Process tasks without any hash yet (completely new)
+                for task_info in tasks_without_hash:
+                    task_text = task_info['task_text']
+                    # Extract URLs before cleaning link syntax
+                    urls = get_markdown_urls(task_text)
+                    note = "\n".join(urls) if urls else ""
+                    task_name = clean_markdown_links(task_text)
+
+                    # Generate new hash for this task
+                    source_id = make_github_source_id(owner, repo, issue_num, task_name)
+                    hash_val = compute_hash(source_id)
+                    task_name_with_hash = append_hash(task_name, hash_val)
+
+                    update_info['new_tasks'].append({
+                        'name': task_name_with_hash,
+                        'hash': hash_val,
+                        'source_id': source_id,
+                        'note': note,
+                    })
+
+                all_updates.append(update_info)
+
+        except subprocess.CalledProcessError as e:
+            print(f"Warning: Could not fetch Issue #{issue_num}: {e.stderr}", file=sys.stderr)
+            continue
+
+    if all_updates:
+        print(f"\nFound updates in {len(all_updates)} existing GitHub Issues")
+
+    return all_updates
+
+
+def prepare_vault_tasks(
+    vault_root: Path, state: Dict[str, Any]
+) -> tuple:
+    """Prepare Vault tasks for sync.
+
+    Returns:
+        (tasks_to_add, due_date_updates) where due_date_updates is a list of
+        dicts for already-synced tasks whose due date changed in the Vault.
+    """
     tasks_to_add = []
+    due_date_updates: List[Dict[str, Any]] = []
 
     print(f"Scanning vault at {vault_root}...")
     vault_files = find_vault_files(vault_root)
@@ -673,11 +940,9 @@ def prepare_vault_tasks(vault_root: Path, state: Dict[str, Any]) -> List[Dict[st
 
         # First pass: Build a map of task names to their hash values for parent references
         task_name_to_hash = {}
-        for task_name, line_num, indent_level, parent_task in tasks:
+        for task_name, line_num, indent_level, parent_task, due_date in tasks:
             cleaned_task_name = clean_markdown_links(task_name)
-            # Remove due date
-            cleaned_task_name = re.sub(r'\s+📅\s+\d{4}-\d{2}-\d{2}', '', cleaned_task_name)
-            cleaned_task_name = re.sub(r'\s+\[due::\s*\d{4}-\d{2}-\d{2}\]', '', cleaned_task_name)
+            # Note: due_date already extracted by extract_tasks, task_name is clean
 
             if has_hash(cleaned_task_name):
                 task_hash = extract_hash(cleaned_task_name)
@@ -691,7 +956,7 @@ def prepare_vault_tasks(vault_root: Path, state: Dict[str, Any]) -> List[Dict[st
         # Track Project container names so their children are also skipped
         skipped_containers: set = set()
 
-        for task_name, line_num, indent_level, parent_task in tasks:
+        for task_name, line_num, indent_level, parent_task, due_date in tasks:
             # Extract URLs from Markdown links and clean task name
             urls = get_markdown_urls(task_name)
             cleaned_task_name = clean_markdown_links(task_name)
@@ -719,6 +984,15 @@ def prepare_vault_tasks(vault_root: Path, state: Dict[str, Any]) -> List[Dict[st
             if has_hash(cleaned_task_name):
                 task_hash = extract_hash(cleaned_task_name)
                 if task_hash and is_synced(task_hash, state):
+                    existing = state[task_hash]
+                    synced_due = existing.get("due_date")
+                    if due_date and due_date != synced_due:
+                        due_date_updates.append({
+                            "task_hash": task_hash,
+                            "of_task_id": existing.get("of_task_id", ""),
+                            "of_task_name": existing.get("of_task_name", ""),
+                            "new_due_date": due_date,
+                        })
                     print(f"  ⊘ {cleaned_task_name} - already synced")
                     continue
             else:
@@ -726,6 +1000,15 @@ def prepare_vault_tasks(vault_root: Path, state: Dict[str, Any]) -> List[Dict[st
                 task_hash = compute_hash(source_id)
 
                 if is_synced(task_hash, state):
+                    existing = state[task_hash]
+                    synced_due = existing.get("due_date")
+                    if due_date and due_date != synced_due:
+                        due_date_updates.append({
+                            "task_hash": task_hash,
+                            "of_task_id": existing.get("of_task_id", ""),
+                            "of_task_name": existing.get("of_task_name", ""),
+                            "new_due_date": due_date,
+                        })
                     print(f"  ⊘ {cleaned_task_name} - already synced")
                     continue
 
@@ -745,6 +1028,10 @@ def prepare_vault_tasks(vault_root: Path, state: Dict[str, Any]) -> List[Dict[st
                     "source_id": source_id
                 }
 
+                # Add due date if present
+                if due_date:
+                    task_dict["dueDate"] = due_date
+
                 # Resolve parent task hash for hierarchical Vault tasks
                 if parent_task:
                     parent_cleaned = clean_markdown_links(parent_task)
@@ -757,7 +1044,7 @@ def prepare_vault_tasks(vault_root: Path, state: Dict[str, Any]) -> List[Dict[st
                 # Add task
                 tasks_to_add.append(task_dict)
 
-    return tasks_to_add
+    return tasks_to_add, due_date_updates
 
 
 def main():
@@ -783,6 +1070,7 @@ def main():
 
     state = load_state()
     all_tasks = []
+    existing_issue_updates = []
 
     print("=" * 70)
     print("TASK SYNC PREPARATION - Full Workflow")
@@ -797,6 +1085,14 @@ def main():
         # Reload state after processing
         state = load_state()
 
+    # STEP 0.5: Detect changes in existing synced GitHub Issues
+    if '/' in args.repo:
+        owner, repo = args.repo.split('/', 1)
+        print("\n[STEP 0.5: Detecting Changes in Existing GitHub Issues]")
+        existing_issue_updates = detect_existing_issue_updates(owner, repo, state)
+        # Reload state after processing
+        state = load_state()
+
     # STEP 1: Prepare GitHub tasks
     if '/' in args.repo:
         owner, repo = args.repo.split('/', 1)
@@ -806,9 +1102,10 @@ def main():
 
     # STEP 2: Prepare Vault tasks
     vault_tasks = []
+    due_date_updates: List[Dict[str, Any]] = []
     if args.vault_root.exists():
         print("\n[STEP 2: Scanning Vault Files]")
-        vault_tasks = prepare_vault_tasks(args.vault_root, state)
+        vault_tasks, due_date_updates = prepare_vault_tasks(args.vault_root, state)
         all_tasks.extend(vault_tasks)
 
         # STEP 2.5: Update Vault files with generated TaskHashes
@@ -817,19 +1114,44 @@ def main():
             print("\n[STEP 2.5: Writing TaskHashes back to Vault Files]")
             update_vault_files_with_hashes(args.vault_root, vault_tasks)
 
+        if due_date_updates:
+            print(f"\n[STEP 2.6: Due Date Updates Detected ({len(due_date_updates)} task(s))]")
+            for upd in due_date_updates:
+                print(f"  ↻ {upd['of_task_name']} → dueDate: {upd['new_due_date']}")
+
     # Save to file for Claude to process
     with open(PREPARE_FILE, 'w') as f:
         json.dump({
             "tasks": all_tasks,
+            "existing_issue_updates": existing_issue_updates,
+            "due_date_updates": due_date_updates,
             "prepared_at": datetime.now().isoformat(),
-            "total_count": len(all_tasks)
+            "total_count": len(all_tasks),
+            "update_count": len(existing_issue_updates),
+            "due_date_update_count": len(due_date_updates),
         }, f, indent=2, ensure_ascii=False)
 
+    # Also save existing issue updates to separate file for clarity
+    if existing_issue_updates:
+        updates_file = SCRIPT_DIR / "existing_issue_updates.json"
+        with open(updates_file, 'w') as f:
+            json.dump({
+                "updates": existing_issue_updates,
+                "prepared_at": datetime.now().isoformat(),
+                "total_updates": len(existing_issue_updates)
+            }, f, indent=2, ensure_ascii=False)
+        print(f"\n✓ Existing Issue Updates: {updates_file}")
+
     print("\n" + "=" * 70)
-    print(f"✓ Prepared {len(all_tasks)} tasks for sync")
+    print(f"✓ Prepared {len(all_tasks)} new tasks for sync")
+    print(f"✓ Detected {len(existing_issue_updates)} existing Issues with updates")
+    print(f"✓ Detected {len(due_date_updates)} due date change(s) for already-synced tasks")
     print(f"Output: {PREPARE_FILE}")
     print("=" * 70)
-    print("\nNext: Ask Claude to sync these tasks to OmniFocus via MCP")
+    if existing_issue_updates:
+        print("\n⚠️  ACTION REQUIRED: Review existing_issue_updates.json")
+        print("   These Issues have been updated and need sync to OmniFocus")
+    print("\nNext: Ask Claude to sync tasks to OmniFocus via MCP")
 
 
 if __name__ == "__main__":
