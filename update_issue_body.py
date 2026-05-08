@@ -23,11 +23,11 @@ SAFETY:
 
 USAGE EXAMPLES:
   # Add a new top-level task
-  python3 update_issue_body.py --issue 3 --add-task "新機能実装 (a1b2c3d4)"
+  python3 update_issue_body.py --issue 3 --add-task "Implement new feature (a1b2c3d4)"
 
   # Add a child task under a parent
   python3 update_issue_body.py --issue 3 \\
-      --add-child "バグフィックス (251383dc)" "画面崩れを修正 (e5f6a7b8)"
+      --add-child "Bug fixes (251383dc)" "Fix layout breakage (e5f6a7b8)"
 
   # Mark a task as complete
   python3 update_issue_body.py --issue 2 --check-task "3d8c2904"

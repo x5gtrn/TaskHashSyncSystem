@@ -461,8 +461,8 @@ def write_daily_note(note_path: Path, content: str) -> None:
 
 def _find_file_containing_hash(hash_val: str) -> Optional[Path]:
     """
-    Calendar/ 以下を全走査して (hash_val) を含む行が存在するファイルを返す。
-    見つからない場合は None。
+    Search all .md files under Calendar/ for a line containing (hash_val).
+    Returns the first matching Path, or None if not found.
     """
     import re as _re
     calendar_dir = VAULT_ROOT / "Calendar"
@@ -481,7 +481,8 @@ def _find_file_containing_hash(hash_val: str) -> Optional[Path]:
 
 def _read_vault_due_date(abs_path: Path, hash_val: str) -> Optional[str]:
     """
-    ファイルから (hash_val) を含む行の📅日付を返す。存在しない場合は None。
+    Return the due date (YYYY-MM-DD) from the line containing (hash_val) in the
+    given file, or None if no due date is present or the file does not exist.
     """
     import re as _re
     if not abs_path.exists():
@@ -500,27 +501,27 @@ def sync_due_dates_to_vault(
     dry_run: bool = False
 ) -> int:
     """
-    OmniFocus の due_date を正として Vault Daily Note のタスクを更新する。
+    Sync OmniFocus due dates (source of truth) to Vault Daily Note task lines.
 
-    比較基準: OmniFocus の due_date  vs  Vault ファイルの実際の📅
-    （sync_state.due_date は使わず、ファイルを直接読んで実態を確認する）
+    Comparison baseline: OmniFocus due_date vs the actual 📅 found in the file
+    (sync_state.due_date is NOT used as baseline — the file is read directly).
 
     Rules:
-      - OmniFocus due_date = X, Vault = Y(≠X) → Vault を X に更新
-      - OmniFocus due_date = X, Vault = なし   → Vault に📅X を追加
-      - OmniFocus due_date = なし, Vault = Y   → Vault の📅を削除
+      - OmniFocus due_date = X, Vault = Y (Y != X) -> update Vault to X
+      - OmniFocus due_date = X, Vault = none        -> add 📅 X to Vault line
+      - OmniFocus due_date = none, Vault = Y        -> remove 📅 from Vault line
 
     Args:
-        all_tasks: all_tasks_raw.json のタスクリスト（OmniFocus の due_date 付き）
-        state:     sync_state.json の内容（インメモリ、直接更新される）
-        dry_run:   True の場合はファイルを書き換えない
+        all_tasks: task list from all_tasks_raw.json (OmniFocus due_date included)
+        state:     sync_state.json content (in-memory; updated in place)
+        dry_run:   when True, report changes but do not write files
 
     Returns:
-        更新したタスク数
+        Number of tasks updated
     """
     import re as _re
 
-    # OmniFocus の hash → due_date マップを構築
+    # Build OmniFocus hash -> due_date map
     of_due_by_hash: Dict[str, Optional[str]] = {}
     for task in all_tasks:
         task_name = task.get('name', '')
@@ -528,7 +529,7 @@ def sync_due_dates_to_vault(
         if m:
             of_due_by_hash[m.group(1)] = task.get('due_date') or None
 
-    # ファイルごとに更新対象をまとめる: rel_path → [(hash, of_due, vault_due), ...]
+    # Group updates by file: rel_path -> [(hash, of_due, vault_due), ...]
     file_updates: Dict[str, List[Tuple]] = {}
 
     for hash_val, entry in state.items():
@@ -542,29 +543,29 @@ def sync_due_dates_to_vault(
         if hash_val not in of_due_by_hash:
             continue
 
-        of_due = of_due_by_hash[hash_val]  # OmniFocus の値（正）
+        of_due = of_due_by_hash[hash_val]  # authoritative value from OmniFocus
 
-        # source_id からファイルパスを抽出
+        # Extract file path from source_id
         rel_path = source_id[len('vault:'):].split(':', 1)[0]
         abs_path = VAULT_ROOT / rel_path
 
-        # ファイルが存在しない場合は Calendar/ を全検索
+        # Fall back to full Calendar/ search when the source_id path does not exist
         if not abs_path.exists():
             found = _find_file_containing_hash(hash_val)
             if found:
                 rel_path = str(found.relative_to(VAULT_ROOT))
                 abs_path = found
-                # source_id を実際のファイルに修正
+                # Correct source_id to the actual file path
                 task_part = source_id.split(':', 2)[2] if source_id.count(':') >= 2 else ''
                 entry['source_id'] = f'vault:{rel_path}:{task_part}'
             else:
-                continue  # どのファイルにも存在しない
+                continue  # hash not found in any Calendar file
 
-        # Vault 実態の📅を読む
+        # Read the actual due date from the Vault file
         vault_due = _read_vault_due_date(abs_path, hash_val)
 
         if of_due == vault_due:
-            continue  # 差分なし
+            continue  # no difference
 
         if rel_path not in file_updates:
             file_updates[rel_path] = []
@@ -600,11 +601,11 @@ def sync_due_dates_to_vault(
 
             if new_content != content:
                 content = new_content
-                old_str = f"📅 {vault_due}" if vault_due else "(なし)"
-                new_str = f"📅 {new_due}" if new_due else "(削除)"
+                old_str = f"📅 {vault_due}" if vault_due else "(none)"
+                new_str = f"📅 {new_due}" if new_due else "(removed)"
                 print(f"  📅 ({hash_val}): {old_str} → {new_str}")
                 updated_count += 1
-                # sync_state を更新
+                # Update sync_state in memory
                 if new_due:
                     state[hash_val]['due_date'] = new_due
                 elif 'due_date' in state[hash_val]:

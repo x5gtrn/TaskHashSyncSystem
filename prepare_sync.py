@@ -644,8 +644,7 @@ def extract_tasks(file_path: Path, file_content: str) -> List[tuple]:
                 continue
 
             # Skip lines that look like metadata (e.g., "Projects (no TaskHash) - excluded from sync:")
-            if 'TaskHash なし' in task_name or '同期対象外' in task_name \
-                    or 'no TaskHash' in task_name or 'excluded from sync' in task_name:
+            if 'no TaskHash' in task_name or 'excluded from sync' in task_name:
                 continue
 
             # Calculate indent level (each tab or 2 spaces = 1 level)

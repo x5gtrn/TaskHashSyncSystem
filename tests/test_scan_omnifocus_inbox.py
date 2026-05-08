@@ -30,28 +30,32 @@ from scan_omnifocus_inbox import (
 
 
 # ─── Fixtures ─────────────────────────────────────────────────────────────────
+#
+# SAMPLE_STATE models a job-search GitHub project (Issue #2) with:
+#   - 60c6d084: the project itself ("Job Search Q3")
+#   - 4375b980: a direct child task ("Follow up on Rayzel referral")
+#   - aaaaaaaa: an unrelated vault task already tracked
 
-# Minimal sync_state with one github_project and one vault_task
 SAMPLE_STATE = {
     "60c6d084": {
-        "source_id": "github:x5gtrn/LIFE#2:転職活動",
+        "source_id": "github:x5gtrn/LIFE#2:Job Search Q3",
         "of_task_id": "proj_001",
-        "of_task_name": "転職活動 (60c6d084)",
+        "of_task_name": "Job Search Q3 (60c6d084)",
         "status": "open",
         "task_type": "github_project",
     },
     "4375b980": {
-        "source_id": "github:x5gtrn/LIFE#2:Rayzel からの斡旋に対応",
+        "source_id": "github:x5gtrn/LIFE#2:Follow up on Rayzel referral",
         "of_task_id": "task_001",
-        "of_task_name": "Rayzel からの斡旋に対応 (4375b980)",
+        "of_task_name": "Follow up on Rayzel referral (4375b980)",
         "status": "open",
         "task_type": "github_task",
         "parent_task_hash": "60c6d084",
     },
     "aaaaaaaa": {
-        "source_id": "vault:Calendar/Daily/2026/05/2026-05-01.md:Already tracked",
+        "source_id": "vault:Calendar/Daily/2026/05/2026-05-01.md:Buy coffee beans",
         "of_task_id": "task_vault_01",
-        "of_task_name": "Already tracked (aaaaaaaa)",
+        "of_task_name": "Buy coffee beans (aaaaaaaa)",
         "status": "open",
         "task_type": "vault_task",
     },
@@ -72,8 +76,8 @@ class TestClassifyTaskByParent(unittest.TestCase):
     def test_task_under_github_project_is_github_issue_child(self):
         task = {
             "id": "t2",
-            "name": "Send resume",
-            "parent_name": "転職活動 (60c6d084)",
+            "name": "Send resume to Acme Corp",
+            "parent_name": "Job Search Q3 (60c6d084)",
         }
         result = classify_task_by_parent(task, SAMPLE_STATE)
         self.assertEqual(result["classification"], "github_issue_child")
@@ -83,7 +87,7 @@ class TestClassifyTaskByParent(unittest.TestCase):
     def test_task_under_native_project_no_hash_is_vault_task(self):
         task = {
             "id": "t3",
-            "name": "Clean desk",
+            "name": "Clean the desk",
             "parent_name": "Later",  # no TaskHash
         }
         result = classify_task_by_parent(task, SAMPLE_STATE)
@@ -101,19 +105,19 @@ class TestClassifyTaskByParent(unittest.TestCase):
         self.assertEqual(result["classification"], "vault_task")
 
     def test_parent_name_stored_in_result(self):
-        task = {"id": "t5", "name": "Task", "parent_name": "Later"}
+        task = {"id": "t5", "name": "Some task", "parent_name": "Later"}
         result = classify_task_by_parent(task, SAMPLE_STATE)
         self.assertEqual(result["parent_name"], "Later")
 
     def test_task_under_vault_task_type_project_is_not_github_child(self):
-        # Even if parent has a hash, if task_type is not github_project → vault_task
+        # Even if parent has a hash, task_type != github_project -> vault_task
         state = {
             "bbbbbbbb": {
                 "source_id": "vault:Calendar/Daily/2026/05/2026-05-01.md:Parent",
                 "task_type": "vault_task",
             }
         }
-        task = {"id": "t6", "name": "Child", "parent_name": "Parent (bbbbbbbb)"}
+        task = {"id": "t6", "name": "Child task", "parent_name": "Parent (bbbbbbbb)"}
         result = classify_task_by_parent(task, state)
         self.assertEqual(result["classification"], "vault_task")
 
@@ -128,14 +132,14 @@ class TestDetectNewTasks(unittest.TestCase):
         self.assertEqual(len(result), 0)
 
     def test_detects_hashless_task(self):
-        tasks = [{"id": "t2", "name": "New task", "parent_name": None}]
+        tasks = [{"id": "t2", "name": "New task without hash", "parent_name": None}]
         result = detect_new_tasks(tasks, SAMPLE_STATE)
         self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["name"], "New task")
+        self.assertEqual(result[0]["name"], "New task without hash")
 
     def test_skips_already_tracked_by_base_name(self):
-        # "Already tracked" is in SAMPLE_STATE source_id
-        tasks = [{"id": "t3", "name": "Already tracked", "parent_name": None}]
+        # "Buy coffee beans" is in SAMPLE_STATE source_id
+        tasks = [{"id": "t3", "name": "Buy coffee beans", "parent_name": None}]
         result = detect_new_tasks(tasks, SAMPLE_STATE)
         self.assertEqual(len(result), 0)
 
@@ -146,12 +150,12 @@ class TestDetectNewTasks(unittest.TestCase):
         self.assertEqual(len(result), 0)
 
     def test_skips_container_task_with_hash_in_parent(self):
-        # Container: "転職活動 (60c6d084)" as both task name and parent name
+        # Container pattern: project name appears as both task and parent
         tasks = [
             {
                 "id": "t5",
-                "name": "転職活動 (60c6d084)",
-                "parent_name": "転職活動 (60c6d084)",
+                "name": "Job Search Q3 (60c6d084)",
+                "parent_name": "Job Search Q3 (60c6d084)",
             }
         ]
         result = detect_new_tasks(tasks, SAMPLE_STATE)
@@ -164,13 +168,13 @@ class TestDetectNewTasks(unittest.TestCase):
 
     def test_multiple_tasks_mixed(self):
         tasks = [
-            {"id": "t1", "name": "Already tracked", "parent_name": None},
-            {"id": "t2", "name": "Existing hash (aaaaaaaa)", "parent_name": None},
-            {"id": "t3", "name": "Truly new", "parent_name": None},
+            {"id": "t1", "name": "Buy coffee beans", "parent_name": None},  # tracked
+            {"id": "t2", "name": "Existing hash (aaaaaaaa)", "parent_name": None},  # has hash
+            {"id": "t3", "name": "Truly new task", "parent_name": None},  # new
         ]
         result = detect_new_tasks(tasks, SAMPLE_STATE)
         self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["name"], "Truly new")
+        self.assertEqual(result[0]["name"], "Truly new task")
 
 
 # ─── insert_tasks_into_daily_note ─────────────────────────────────────────────
@@ -205,35 +209,35 @@ class TestInsertTasksIntoDailyNote(unittest.TestCase):
         self.assertLess(task_idx, proj_idx)
 
     def test_due_date_appended_when_present(self):
-        """Regression: due_date must be written to Vault when task is inserted."""
+        """Regression: due_date must be written to Vault when a task is inserted."""
         result = insert_tasks_into_daily_note(
             self.MINIMAL_NOTE,
-            [self._make_task("Bill payment", "bbbbbbbb", due_date="2026-05-20")]
+            [self._make_task("Pay monthly rent", "bbbbbbbb", due_date="2026-05-20")]
         )
-        self.assertIn("- [ ] Bill payment (bbbbbbbb) 📅 2026-05-20", result)
+        self.assertIn("- [ ] Pay monthly rent (bbbbbbbb) 📅 2026-05-20", result)
 
     def test_no_due_date_when_none(self):
         result = insert_tasks_into_daily_note(
             self.MINIMAL_NOTE,
-            [self._make_task("No due", "cccccccc", due_date=None)]
+            [self._make_task("Call accountant", "cccccccc", due_date=None)]
         )
-        task_line = next(l for l in result.splitlines() if "No due" in l)
+        task_line = next(l for l in result.splitlines() if "Call accountant" in l)
         self.assertNotIn("📅", task_line)
 
     def test_idempotent_no_duplicate(self):
         result1 = insert_tasks_into_daily_note(
             self.MINIMAL_NOTE,
-            [self._make_task("Task once", "dddddddd")]
+            [self._make_task("Water the plants", "dddddddd")]
         )
         result2 = insert_tasks_into_daily_note(
             result1,
-            [self._make_task("Task once", "dddddddd")]
+            [self._make_task("Water the plants", "dddddddd")]
         )
         # Should appear exactly once
-        self.assertEqual(result2.count("Task once"), 1)
+        self.assertEqual(result2.count("Water the plants"), 1)
 
     def test_creates_tasks_section_if_missing(self):
-        note_without_section = "---\ntags: [daily]\n---\n\nSome content\n"
+        note_without_section = "---\ntags: [daily]\n---\n\nSome freeform content\n"
         result = insert_tasks_into_daily_note(
             note_without_section,
             [self._make_task("Orphan task", "eeeeeeee")]
@@ -243,26 +247,26 @@ class TestInsertTasksIntoDailyNote(unittest.TestCase):
 
     def test_multiple_tasks_all_inserted(self):
         tasks = [
-            self._make_task("Task A", "11111111"),
-            self._make_task("Task B", "22222222", due_date="2026-06-01"),
-            self._make_task("Task C", "33333333"),
+            self._make_task("Order office supplies", "11111111"),
+            self._make_task("Pay monthly rent", "22222222", due_date="2026-06-01"),
+            self._make_task("Schedule team standup", "33333333"),
         ]
         result = insert_tasks_into_daily_note(self.MINIMAL_NOTE, tasks)
-        self.assertIn("Task A", result)
-        self.assertIn("Task B (22222222) 📅 2026-06-01", result)
-        self.assertIn("Task C", result)
+        self.assertIn("Order office supplies", result)
+        self.assertIn("Pay monthly rent (22222222) 📅 2026-06-01", result)
+        self.assertIn("Schedule team standup", result)
 
     def test_existing_tasks_not_overwritten(self):
         note_with_task = (
             "---\ntags: [daily]\n---\n\n## Tasks\n"
-            "- [x] Old task (ffffffff)\n\n## Projects\n"
+            "- [x] Old completed task (ffffffff)\n\n## Projects\n"
         )
         result = insert_tasks_into_daily_note(
             note_with_task,
-            [self._make_task("New task", "00000001")]
+            [self._make_task("New incoming task", "00000001")]
         )
-        self.assertIn("- [x] Old task (ffffffff)", result)
-        self.assertIn("- [ ] New task (00000001)", result)
+        self.assertIn("- [x] Old completed task (ffffffff)", result)
+        self.assertIn("- [ ] New incoming task (00000001)", result)
 
 
 # ─── _read_vault_due_date ─────────────────────────────────────────────────────
@@ -278,11 +282,11 @@ class TestReadVaultDueDate(unittest.TestCase):
         return Path(tmp.name)
 
     def test_reads_due_date_when_present(self):
-        p = self._write_temp("- [ ] Task (aaaaaaaa) 📅 2026-05-20\n")
+        p = self._write_temp("- [ ] Pay monthly rent (aaaaaaaa) 📅 2026-05-20\n")
         self.assertEqual(_read_vault_due_date(p, "aaaaaaaa"), "2026-05-20")
 
     def test_returns_none_when_no_due_date(self):
-        p = self._write_temp("- [ ] Task (aaaaaaaa)\n")
+        p = self._write_temp("- [ ] Pay monthly rent (aaaaaaaa)\n")
         self.assertIsNone(_read_vault_due_date(p, "aaaaaaaa"))
 
     def test_returns_none_when_hash_not_in_file(self):
@@ -294,14 +298,14 @@ class TestReadVaultDueDate(unittest.TestCase):
 
     def test_reads_due_date_from_completed_task(self):
         p = self._write_temp(
-            "- [x] Task (aaaaaaaa) 📅 2026-05-20 ✅ 2026-05-21\n"
+            "- [x] Pay monthly rent (aaaaaaaa) 📅 2026-05-20 ✅ 2026-05-21\n"
         )
         self.assertEqual(_read_vault_due_date(p, "aaaaaaaa"), "2026-05-20")
 
     def test_handles_multiple_tasks_picks_correct_one(self):
         content = (
-            "- [ ] Task A (aaaaaaaa) 📅 2026-05-10\n"
-            "- [ ] Task B (bbbbbbbb) 📅 2026-06-01\n"
+            "- [ ] Pay monthly rent (aaaaaaaa) 📅 2026-05-10\n"
+            "- [ ] Submit tax return (bbbbbbbb) 📅 2026-06-01\n"
         )
         p = self._write_temp(content)
         self.assertEqual(_read_vault_due_date(p, "aaaaaaaa"), "2026-05-10")
@@ -318,7 +322,7 @@ class TestFindFileContainingHash(unittest.TestCase):
             cal_dir = vault_root / "Calendar" / "Daily" / "2026" / "05"
             cal_dir.mkdir(parents=True)
             note = cal_dir / "2026-05-08.md"
-            note.write_text("- [ ] Task (deadbeef)\n", encoding='utf-8')
+            note.write_text("- [ ] Pay monthly rent (deadbeef)\n", encoding='utf-8')
 
             with patch.object(soi, 'VAULT_ROOT', vault_root):
                 result = _find_file_containing_hash("deadbeef")
@@ -331,7 +335,9 @@ class TestFindFileContainingHash(unittest.TestCase):
             vault_root = Path(tmpdir)
             cal_dir = vault_root / "Calendar" / "Daily" / "2026" / "05"
             cal_dir.mkdir(parents=True)
-            (cal_dir / "2026-05-08.md").write_text("- [ ] Task (aaaaaaaa)\n", encoding='utf-8')
+            (cal_dir / "2026-05-08.md").write_text(
+                "- [ ] Some task (aaaaaaaa)\n", encoding='utf-8'
+            )
 
             with patch.object(soi, 'VAULT_ROOT', vault_root):
                 result = _find_file_containing_hash("00000000")
@@ -341,7 +347,7 @@ class TestFindFileContainingHash(unittest.TestCase):
     def test_returns_none_when_calendar_dir_missing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             vault_root = Path(tmpdir)
-            # Calendar/ does not exist
+            # Calendar/ directory does not exist
             with patch.object(soi, 'VAULT_ROOT', vault_root):
                 result = _find_file_containing_hash("aaaaaaaa")
         self.assertIsNone(result)
@@ -351,12 +357,12 @@ class TestFindFileContainingHash(unittest.TestCase):
 
 class TestSyncDueDatesToVault(unittest.TestCase):
     """
-    Tests for the due-date sync logic.  We use a temporary directory to avoid
-    touching the real vault.
+    Tests for the OmniFocus -> Vault due-date sync logic.
+    Uses a temporary directory to avoid touching the real vault.
     """
 
     def _setup_vault(self, note_content: str, rel_path: str):
-        """Create a temp vault with a single note. Returns (tmpdir_path, abs_note_path)."""
+        """Create a temp vault with a single note. Returns (vault_root, abs_note_path)."""
         tmpdir = tempfile.mkdtemp()
         abs_path = Path(tmpdir) / rel_path
         abs_path.parent.mkdir(parents=True, exist_ok=True)
@@ -365,17 +371,17 @@ class TestSyncDueDatesToVault(unittest.TestCase):
 
     def test_adds_due_date_when_of_has_date_and_vault_has_none(self):
         rel = "Calendar/Daily/2026/05/2026-05-08.md"
-        note = "- [ ] Task (aaaaaaaa)\n"
+        note = "- [ ] Pay monthly rent (aaaaaaaa)\n"
         vault_root, abs_path = self._setup_vault(note, rel)
 
         state = {
             "aaaaaaaa": {
-                "source_id": f"vault:{rel}:Task",
+                "source_id": f"vault:{rel}:Pay monthly rent",
                 "task_type": "vault_task",
                 "status": "open",
             }
         }
-        all_tasks = [{"name": "Task (aaaaaaaa)", "due_date": "2026-05-20"}]
+        all_tasks = [{"name": "Pay monthly rent (aaaaaaaa)", "due_date": "2026-05-20"}]
 
         with patch.object(soi, 'VAULT_ROOT', vault_root):
             count = sync_due_dates_to_vault(all_tasks, state, dry_run=False)
@@ -386,17 +392,17 @@ class TestSyncDueDatesToVault(unittest.TestCase):
 
     def test_removes_due_date_when_of_has_none_and_vault_has_date(self):
         rel = "Calendar/Daily/2026/05/2026-05-08.md"
-        note = "- [ ] Task (aaaaaaaa) 📅 2026-05-20\n"
+        note = "- [ ] Pay monthly rent (aaaaaaaa) 📅 2026-05-20\n"
         vault_root, abs_path = self._setup_vault(note, rel)
 
         state = {
             "aaaaaaaa": {
-                "source_id": f"vault:{rel}:Task",
+                "source_id": f"vault:{rel}:Pay monthly rent",
                 "task_type": "vault_task",
                 "status": "open",
             }
         }
-        all_tasks = [{"name": "Task (aaaaaaaa)", "due_date": None}]
+        all_tasks = [{"name": "Pay monthly rent (aaaaaaaa)", "due_date": None}]
 
         with patch.object(soi, 'VAULT_ROOT', vault_root):
             count = sync_due_dates_to_vault(all_tasks, state, dry_run=False)
@@ -407,17 +413,17 @@ class TestSyncDueDatesToVault(unittest.TestCase):
 
     def test_updates_due_date_when_both_differ(self):
         rel = "Calendar/Daily/2026/05/2026-05-08.md"
-        note = "- [ ] Task (aaaaaaaa) 📅 2026-05-10\n"
+        note = "- [ ] Pay monthly rent (aaaaaaaa) 📅 2026-05-10\n"
         vault_root, abs_path = self._setup_vault(note, rel)
 
         state = {
             "aaaaaaaa": {
-                "source_id": f"vault:{rel}:Task",
+                "source_id": f"vault:{rel}:Pay monthly rent",
                 "task_type": "vault_task",
                 "status": "open",
             }
         }
-        all_tasks = [{"name": "Task (aaaaaaaa)", "due_date": "2026-06-01"}]
+        all_tasks = [{"name": "Pay monthly rent (aaaaaaaa)", "due_date": "2026-06-01"}]
 
         with patch.object(soi, 'VAULT_ROOT', vault_root):
             count = sync_due_dates_to_vault(all_tasks, state, dry_run=False)
@@ -429,17 +435,17 @@ class TestSyncDueDatesToVault(unittest.TestCase):
 
     def test_no_change_when_dates_already_match(self):
         rel = "Calendar/Daily/2026/05/2026-05-08.md"
-        note = "- [ ] Task (aaaaaaaa) 📅 2026-05-20\n"
+        note = "- [ ] Pay monthly rent (aaaaaaaa) 📅 2026-05-20\n"
         vault_root, abs_path = self._setup_vault(note, rel)
 
         state = {
             "aaaaaaaa": {
-                "source_id": f"vault:{rel}:Task",
+                "source_id": f"vault:{rel}:Pay monthly rent",
                 "task_type": "vault_task",
                 "status": "open",
             }
         }
-        all_tasks = [{"name": "Task (aaaaaaaa)", "due_date": "2026-05-20"}]
+        all_tasks = [{"name": "Pay monthly rent (aaaaaaaa)", "due_date": "2026-05-20"}]
 
         with patch.object(soi, 'VAULT_ROOT', vault_root):
             count = sync_due_dates_to_vault(all_tasks, state, dry_run=False)
@@ -448,17 +454,17 @@ class TestSyncDueDatesToVault(unittest.TestCase):
 
     def test_skips_completed_tasks(self):
         rel = "Calendar/Daily/2026/05/2026-05-08.md"
-        note = "- [x] Task (aaaaaaaa)\n"
+        note = "- [x] Pay monthly rent (aaaaaaaa)\n"
         vault_root, abs_path = self._setup_vault(note, rel)
 
         state = {
             "aaaaaaaa": {
-                "source_id": f"vault:{rel}:Task",
+                "source_id": f"vault:{rel}:Pay monthly rent",
                 "task_type": "vault_task",
                 "status": "completed",
             }
         }
-        all_tasks = [{"name": "Task (aaaaaaaa)", "due_date": "2026-05-20"}]
+        all_tasks = [{"name": "Pay monthly rent (aaaaaaaa)", "due_date": "2026-05-20"}]
 
         with patch.object(soi, 'VAULT_ROOT', vault_root):
             count = sync_due_dates_to_vault(all_tasks, state, dry_run=False)
@@ -467,17 +473,17 @@ class TestSyncDueDatesToVault(unittest.TestCase):
 
     def test_skips_github_tasks(self):
         rel = "Calendar/Daily/2026/05/2026-05-08.md"
-        note = "- [ ] Task (aaaaaaaa)\n"
+        note = "- [ ] Pay monthly rent (aaaaaaaa)\n"
         vault_root, abs_path = self._setup_vault(note, rel)
 
         state = {
             "aaaaaaaa": {
-                "source_id": "github:x5gtrn/LIFE#2:Task",
+                "source_id": "github:x5gtrn/LIFE#2:Pay monthly rent",
                 "task_type": "github_task",
                 "status": "open",
             }
         }
-        all_tasks = [{"name": "Task (aaaaaaaa)", "due_date": "2026-05-20"}]
+        all_tasks = [{"name": "Pay monthly rent (aaaaaaaa)", "due_date": "2026-05-20"}]
 
         with patch.object(soi, 'VAULT_ROOT', vault_root):
             count = sync_due_dates_to_vault(all_tasks, state, dry_run=False)
@@ -486,28 +492,28 @@ class TestSyncDueDatesToVault(unittest.TestCase):
 
     def test_dry_run_does_not_write_file(self):
         rel = "Calendar/Daily/2026/05/2026-05-08.md"
-        note = "- [ ] Task (aaaaaaaa)\n"
+        note = "- [ ] Pay monthly rent (aaaaaaaa)\n"
         vault_root, abs_path = self._setup_vault(note, rel)
 
         state = {
             "aaaaaaaa": {
-                "source_id": f"vault:{rel}:Task",
+                "source_id": f"vault:{rel}:Pay monthly rent",
                 "task_type": "vault_task",
                 "status": "open",
             }
         }
-        all_tasks = [{"name": "Task (aaaaaaaa)", "due_date": "2026-05-20"}]
+        all_tasks = [{"name": "Pay monthly rent (aaaaaaaa)", "due_date": "2026-05-20"}]
 
         with patch.object(soi, 'VAULT_ROOT', vault_root):
             count = sync_due_dates_to_vault(all_tasks, state, dry_run=True)
 
-        self.assertEqual(count, 1)  # still reports the change
+        self.assertEqual(count, 1)  # change is detected and reported
         unchanged = abs_path.read_text(encoding='utf-8')
         self.assertNotIn("📅", unchanged)  # but file is NOT modified
 
     def test_fallback_finds_file_when_source_id_path_wrong(self):
         """
-        Regression: when source_id points to a non-existent date, the function
+        Regression: when source_id points to a non-existent file, the function
         must search Calendar/ for the actual file that contains the hash.
         """
         wrong_rel = "Calendar/Daily/2026/05/2026-05-09.md"  # does not exist
@@ -518,17 +524,17 @@ class TestSyncDueDatesToVault(unittest.TestCase):
             real_dir = vault_root / "Calendar" / "Daily" / "2026" / "05"
             real_dir.mkdir(parents=True)
             (real_dir / "2026-05-07.md").write_text(
-                "- [ ] Task (aaaaaaaa)\n", encoding='utf-8'
+                "- [ ] Pay monthly rent (aaaaaaaa)\n", encoding='utf-8'
             )
 
             state = {
                 "aaaaaaaa": {
-                    "source_id": f"vault:{wrong_rel}:Task",  # wrong path
+                    "source_id": f"vault:{wrong_rel}:Pay monthly rent",  # wrong path
                     "task_type": "vault_task",
                     "status": "open",
                 }
             }
-            all_tasks = [{"name": "Task (aaaaaaaa)", "due_date": "2026-05-14"}]
+            all_tasks = [{"name": "Pay monthly rent (aaaaaaaa)", "due_date": "2026-05-14"}]
 
             with patch.object(soi, 'VAULT_ROOT', vault_root):
                 count = sync_due_dates_to_vault(all_tasks, state, dry_run=False)
@@ -539,17 +545,17 @@ class TestSyncDueDatesToVault(unittest.TestCase):
 
     def test_updates_sync_state_due_date_in_memory(self):
         rel = "Calendar/Daily/2026/05/2026-05-08.md"
-        note = "- [ ] Task (aaaaaaaa)\n"
+        note = "- [ ] Pay monthly rent (aaaaaaaa)\n"
         vault_root, _ = self._setup_vault(note, rel)
 
         state = {
             "aaaaaaaa": {
-                "source_id": f"vault:{rel}:Task",
+                "source_id": f"vault:{rel}:Pay monthly rent",
                 "task_type": "vault_task",
                 "status": "open",
             }
         }
-        all_tasks = [{"name": "Task (aaaaaaaa)", "due_date": "2026-05-25"}]
+        all_tasks = [{"name": "Pay monthly rent (aaaaaaaa)", "due_date": "2026-05-25"}]
 
         with patch.object(soi, 'VAULT_ROOT', vault_root):
             sync_due_dates_to_vault(all_tasks, state, dry_run=False)
@@ -558,18 +564,18 @@ class TestSyncDueDatesToVault(unittest.TestCase):
 
     def test_deletes_due_date_from_sync_state_when_of_removes_it(self):
         rel = "Calendar/Daily/2026/05/2026-05-08.md"
-        note = "- [ ] Task (aaaaaaaa) 📅 2026-05-20\n"
+        note = "- [ ] Pay monthly rent (aaaaaaaa) 📅 2026-05-20\n"
         vault_root, _ = self._setup_vault(note, rel)
 
         state = {
             "aaaaaaaa": {
-                "source_id": f"vault:{rel}:Task",
+                "source_id": f"vault:{rel}:Pay monthly rent",
                 "task_type": "vault_task",
                 "status": "open",
                 "due_date": "2026-05-20",
             }
         }
-        all_tasks = [{"name": "Task (aaaaaaaa)", "due_date": None}]
+        all_tasks = [{"name": "Pay monthly rent (aaaaaaaa)", "due_date": None}]
 
         with patch.object(soi, 'VAULT_ROOT', vault_root):
             sync_due_dates_to_vault(all_tasks, state, dry_run=False)

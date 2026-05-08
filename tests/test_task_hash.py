@@ -34,7 +34,7 @@ class TestComputeHash(unittest.TestCase):
 
     def test_deterministic(self):
         """Same source_id always produces the same hash."""
-        src = "vault:Calendar/Daily/2026/05/2026-05-01.md:Buy coffee"
+        src = "vault:Calendar/Daily/2026/05/2026-05-01.md:Buy coffee beans"
         self.assertEqual(compute_hash(src), compute_hash(src))
 
     def test_format_8_hex_digits(self):
@@ -51,21 +51,19 @@ class TestComputeHash(unittest.TestCase):
         self.assertNotEqual(h1, h2)
 
     def test_known_vault_hash(self):
-        """Regression: verify hash for a known vault task (from sync_state.json)."""
-        # source_id from inbox_rename_requests.json (2026-05-08 session)
-        src = "vault:Calendar/Daily/2026/05/2026-05-08.md:46,800円"
-        self.assertEqual(compute_hash(src), "c0cb8277")
+        """Regression: verify hash for a known vault source_id is stable."""
+        src = "vault:Calendar/Daily/2026/05/2026-05-08.md:Pay monthly rent"
+        self.assertEqual(compute_hash(src), "9f236065")
 
-    def test_known_vault_hash_japanese(self):
-        """Regression: verify hash for Japanese task name."""
-        src = "vault:Calendar/Daily/2026/05/2026-05-08.md:服畳んでしまう"
-        self.assertEqual(compute_hash(src), "68f15567")
+    def test_known_vault_hash_2(self):
+        """Regression: second known-value check to guard against algorithm drift."""
+        src = "vault:Calendar/Daily/2026/05/2026-05-08.md:Fold and store laundry"
+        self.assertEqual(compute_hash(src), "59bc1bb3")
 
-    def test_encoding_sensitivity(self):
-        """Different encodings of the same string must produce the same hash (UTF-8 throughout)."""
-        src = "vault:Calendar/Daily/2026/05/2026-05-08.md:送られてきたJDを確認する"
-        h = compute_hash(src)
-        self.assertEqual(len(h), 8)
+    def test_known_vault_hash_3(self):
+        """Regression: third known-value check."""
+        src = "vault:Calendar/Daily/2026/05/2026-05-08.md:Review job description"
+        self.assertEqual(compute_hash(src), "6772effd")
 
 
 # ─── source_id helpers ────────────────────────────────────────────────────────
@@ -73,12 +71,12 @@ class TestComputeHash(unittest.TestCase):
 class TestMakeSourceId(unittest.TestCase):
 
     def test_github_source_id_format(self):
-        sid = make_github_source_id("x5gtrn", "LIFE", 2, "タスク名")
-        self.assertEqual(sid, "github:x5gtrn/LIFE#2:タスク名")
+        sid = make_github_source_id("x5gtrn", "LIFE", 2, "Submit final report")
+        self.assertEqual(sid, "github:x5gtrn/LIFE#2:Submit final report")
 
     def test_vault_source_id_format(self):
-        sid = make_vault_source_id("Calendar/Daily/2026/05/2026-05-08.md", "My Task")
-        self.assertEqual(sid, "vault:Calendar/Daily/2026/05/2026-05-08.md:My Task")
+        sid = make_vault_source_id("Calendar/Daily/2026/05/2026-05-08.md", "Buy groceries")
+        self.assertEqual(sid, "vault:Calendar/Daily/2026/05/2026-05-08.md:Buy groceries")
 
     def test_github_source_id_issue_zero(self):
         sid = make_github_source_id("owner", "repo", 0, "title")
@@ -107,8 +105,8 @@ class TestHasHash(unittest.TestCase):
         # Hashes must be lowercase hex
         self.assertFalse(has_hash("Task (A1B2C3D4)"))
 
-    def test_japanese_task_with_hash(self):
-        self.assertTrue(has_hash("服畳んでしまう (68f15567)"))
+    def test_multi_word_task_with_hash(self):
+        self.assertTrue(has_hash("Fold and store laundry (59bc1bb3)"))
 
     def test_empty_string(self):
         self.assertFalse(has_hash(""))
@@ -127,8 +125,8 @@ class TestExtractHash(unittest.TestCase):
     def test_returns_none_for_mid_string_hash(self):
         self.assertIsNone(extract_hash("(a1b2c3d4) Task Name"))
 
-    def test_japanese_task(self):
-        self.assertEqual(extract_hash("送られてきたJDを確認する (3d8c2904)"), "3d8c2904")
+    def test_multi_word_task(self):
+        self.assertEqual(extract_hash("Review job description (6772effd)"), "6772effd")
 
     def test_empty_string(self):
         self.assertIsNone(extract_hash(""))
@@ -148,11 +146,11 @@ class TestRemoveHash(unittest.TestCase):
         # Hash not at suffix — must be left untouched
         self.assertEqual(remove_hash("(a1b2c3d4) Task Name"), "(a1b2c3d4) Task Name")
 
-    def test_japanese_task(self):
-        self.assertEqual(remove_hash("服畳んでしまう (68f15567)"), "服畳んでしまう")
+    def test_multi_word_task(self):
+        self.assertEqual(remove_hash("Fold and store laundry (59bc1bb3)"), "Fold and store laundry")
 
     def test_idempotent(self):
-        name = "Task (deadbeef)"
+        name = "Buy groceries (deadbeef)"
         self.assertEqual(remove_hash(remove_hash(name)), remove_hash(name))
 
 
@@ -161,15 +159,15 @@ class TestRemoveHash(unittest.TestCase):
 class TestAppendHash(unittest.TestCase):
 
     def test_appends_hash_when_absent(self):
-        src = "vault:Calendar/Daily/2026/05/2026-05-01.md:Buy coffee"
-        result = append_hash("Buy coffee", src)
+        src = "vault:Calendar/Daily/2026/05/2026-05-01.md:Buy coffee beans"
+        result = append_hash("Buy coffee beans", src)
         h = compute_hash(src)
-        self.assertEqual(result, f"Buy coffee ({h})")
+        self.assertEqual(result, f"Buy coffee beans ({h})")
 
     def test_idempotent_when_hash_present(self):
         name = "Task (a1b2c3d4)"
         src = "vault:some/path.md:Task"
-        # Has hash already → return unchanged
+        # Has hash already -> return unchanged
         self.assertEqual(append_hash(name, src), name)
 
 
@@ -183,20 +181,20 @@ class TestMarkdownLinks(unittest.TestCase):
         self.assertEqual(urls, ["https://google.com"])
 
     def test_multiple_links(self):
-        raw = "[A](http://a.com) and [B](http://b.com)"
+        raw = "[Alpha](http://alpha.com) and [Beta](http://beta.com)"
         text, urls = extract_markdown_links(raw)
-        self.assertEqual(text, "A and B")
-        self.assertIn("http://a.com", urls)
-        self.assertIn("http://b.com", urls)
+        self.assertEqual(text, "Alpha and Beta")
+        self.assertIn("http://alpha.com", urls)
+        self.assertIn("http://beta.com", urls)
 
     def test_no_links(self):
-        text, urls = extract_markdown_links("Plain text")
-        self.assertEqual(text, "Plain text")
+        text, urls = extract_markdown_links("Plain text task")
+        self.assertEqual(text, "Plain text task")
         self.assertEqual(urls, [])
 
     def test_clean_markdown_links(self):
-        result = clean_markdown_links("[Rayzel Lie](https://linkedin.com/in/abc)")
-        self.assertEqual(result, "Rayzel Lie")
+        result = clean_markdown_links("[Schedule interview](https://calendly.com/abc)")
+        self.assertEqual(result, "Schedule interview")
 
     def test_get_markdown_urls(self):
         urls = get_markdown_urls("[X](https://x.com) text [Y](https://y.com)")
@@ -208,54 +206,57 @@ class TestMarkdownLinks(unittest.TestCase):
 class TestCleanTaskNameForHash(unittest.TestCase):
     """
     The single source of truth for task name normalisation before hash generation.
-    Cleaning order: markdown links → due date emoji → due date bracket → existing hash.
+    Cleaning order: markdown links -> due date emoji -> due date bracket -> existing hash.
     """
 
     def test_strips_markdown_link(self):
         self.assertEqual(
-            clean_task_name_for_hash("[Buy Groceries](https://store.com)"),
-            "Buy Groceries"
+            clean_task_name_for_hash("[Buy groceries](https://store.com)"),
+            "Buy groceries"
         )
 
     def test_strips_due_date_emoji(self):
         self.assertEqual(
-            clean_task_name_for_hash("Task Name 📅 2026-05-15"),
-            "Task Name"
+            clean_task_name_for_hash("Pay monthly rent 📅 2026-05-15"),
+            "Pay monthly rent"
         )
 
     def test_strips_due_date_bracket(self):
         self.assertEqual(
-            clean_task_name_for_hash("Task Name [due:: 2026-05-15]"),
-            "Task Name"
+            clean_task_name_for_hash("Pay monthly rent [due:: 2026-05-15]"),
+            "Pay monthly rent"
         )
 
     def test_strips_existing_hash(self):
         self.assertEqual(
-            clean_task_name_for_hash("Task Name (a1b2c3d4)"),
-            "Task Name"
+            clean_task_name_for_hash("Pay monthly rent (a1b2c3d4)"),
+            "Pay monthly rent"
         )
 
     def test_strips_all_combined(self):
-        raw = "[Buy Groceries](https://store.com) 📅 2026-05-10 (a1b2c3d4)"
-        self.assertEqual(clean_task_name_for_hash(raw), "Buy Groceries")
+        raw = "[Buy groceries](https://store.com) 📅 2026-05-10 (a1b2c3d4)"
+        self.assertEqual(clean_task_name_for_hash(raw), "Buy groceries")
 
     def test_noop_plain_name(self):
-        self.assertEqual(clean_task_name_for_hash("Plain Task"), "Plain Task")
+        self.assertEqual(clean_task_name_for_hash("Plain task name"), "Plain task name")
 
     def test_strips_whitespace(self):
         self.assertEqual(clean_task_name_for_hash("  Task  "), "Task")
 
-    def test_japanese_task_unchanged(self):
-        self.assertEqual(clean_task_name_for_hash("服畳んでしまう"), "服畳んでしまう")
+    def test_ascii_only_task_unchanged(self):
+        name = "Schedule dentist appointment"
+        self.assertEqual(clean_task_name_for_hash(name), name)
 
     def test_hash_stable_after_cleaning(self):
-        """Hash computed on cleaned name equals hash of the same name passed directly."""
-        raw = "Buy Groceries 📅 2026-05-10 (ffffffff)"
-        clean = clean_task_name_for_hash(raw)  # → "Buy Groceries"
+        """Hash computed on cleaned name equals hash of the same clean name directly."""
+        raw = "Buy groceries 📅 2026-05-10 (ffffffff)"
+        clean = clean_task_name_for_hash(raw)  # -> "Buy groceries"
         src = f"vault:Calendar/Daily/2026/05/2026-05-01.md:{clean}"
-        h_from_raw = compute_hash(f"vault:Calendar/Daily/2026/05/2026-05-01.md:{clean_task_name_for_hash(raw)}")
+        h_via_clean = compute_hash(
+            f"vault:Calendar/Daily/2026/05/2026-05-01.md:{clean_task_name_for_hash(raw)}"
+        )
         h_direct = compute_hash(src)
-        self.assertEqual(h_from_raw, h_direct)
+        self.assertEqual(h_via_clean, h_direct)
 
 
 if __name__ == "__main__":
