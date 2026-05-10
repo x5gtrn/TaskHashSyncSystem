@@ -147,20 +147,18 @@ Vault Daily Note Task:
 |------|---------|
 | `task_hash.py` | TaskHash generation and utilities (core library) |
 | `prepare_sync.py` | Scan GitHub Issues + Vault; detect changes in existing Issues; generate TaskHashes; output tasks_to_sync.json + existing_issue_updates.json |
-| `sync_to_omnifocus.py` | Resolve parentTaskHash → parentTaskId; validate; output mcp_batch_add_request.json |
-| `update_sync_state.py` | Update sync_state.json after MCP execution |
+| `sync_to_omnifocus.py` | Resolve parentTaskHash → parentTaskId; validate; output precheck_requests.json |
 | `reverse_sync.py` | Sync completed tasks from OmniFocus back to GitHub/Vault |
-| `scan_omnifocus_inbox.py` | Scan ALL OmniFocus tasks for hashless items; route to Vault Daily Note or GitHub Issue |
-| `run_complete_sync.py` | Debug utility: `--check-only` (workflow state) / `--cleanup` (reset queue) |
-| `test_system.py` | Test suite for validating system components |
+| `scan_omnifocus_inbox.py` | Scan ALL OmniFocus tasks for hashless items; route to Vault Daily Note or GitHub Issue based on added_date and parent |
+| `update_issue_body.py` | Atomic diff-based GitHub Issue body editor (REQUIRED for all Issue body edits) |
 | `sync_state.json` | Central sync state database (TaskHash → OmniFocus ID mapping) |
 | `tasks_to_sync.json` | Queue: output of prepare_sync.py, consumed by sync_to_omnifocus.py |
 | `existing_issue_updates.json` | Output: changes detected in existing GitHub Issues (new_tasks, completion_changes, deleted_tasks) |
-| `tasks_resolved.json` | Intermediate: parentTaskHash resolved to parentTaskId |
-| `mcp_batch_add_request.json` | Formatted MCP batch_add_items request for Claude |
 | `precheck_requests.json` | Existence checks Claude MUST run (get_task_by_id) before batch_add_items |
 | `all_tasks_raw.json` | Input to scan_omnifocus_inbox.py (Claude normalizes from dump_database output) |
+| `completed_tasks_raw.json` | Input to reverse_sync.py (Claude writes from filter_tasks MCP result) |
 | `inbox_rename_requests.json` | List of edit_item calls for Claude to rename OmniFocus tasks |
+| `github_issue_additions.json` | Tasks to add to GitHub Issue bodies (output of scan_omnifocus_inbox.py) |
 
 ---
 
@@ -661,9 +659,9 @@ without a TaskHash. These tasks must be discovered and routed before they become
    {
      "fetched_at": "2026-05-06T14:00:00",
      "tasks": [
-       {"id": "abc1", "name": "Clean desk",    "due_date": null, "parent_name": "Later"},
-       {"id": "abc2", "name": "Buy milk",      "due_date": null, "parent_name": null},
-       {"id": "abc3", "name": "Write report",  "due_date": "2026-05-10", "parent_name": "転職活動: フリーランスから正規雇用へ (60c6d084)"}
+       {"id": "abc1", "name": "Clean desk",   "due_date": null, "added_date": "2026-05-04", "parent_name": "Later"},
+       {"id": "abc2", "name": "Buy milk",     "due_date": null, "added_date": "2026-05-06", "parent_name": null},
+       {"id": "abc3", "name": "Write report", "due_date": "2026-05-10", "added_date": "2026-05-05", "parent_name": "Job Search Q3 (60c6d084)"}
      ]
    }
    ```
@@ -679,22 +677,32 @@ without a TaskHash. These tasks must be discovered and routed before they become
    Found 3 new task(s) without TaskHash:
      • Clean desk (parent: Later)
      • Buy milk (Inbox)
-     • Write report (parent: 転職活動: フリーランスから正規雇用へ (60c6d084))
+     • Write report (parent: Job Search Q3 (60c6d084))
 
    Classification Results:
      📍 GitHub Issue children:  1 task(s)
         → Issue #2: Write report
      📍 Vault Daily Note tasks: 2 task(s)
-        → Clean desk [parent: Later]
-        → Buy milk [Inbox]
+        → Clean desk [parent: Later]  [target: 2026-05-04]
+        → Buy milk [Inbox]            [target: 2026-05-06]
    ```
 
-5. **Vault Daily Note updated** (`Calendar/Daily/2026/05/2026-05-06.md`):
+5. **Vault Daily Notes updated per task creation date:**
+
+   `Calendar/Daily/2026/05/2026-05-04.md`:
    ```markdown
    ## Tasks
    - [ ] Clean desk (a1f2b3c4)
+   ```
+
+   `Calendar/Daily/2026/05/2026-05-06.md`:
+   ```markdown
+   ## Tasks
    - [ ] Buy milk (d5e6f7a8)
    ```
+
+   Each task is written to the Daily Note for the date it was created in OmniFocus (`added_date`),
+   not today's date. If `added_date` is absent, the script falls back to today (or `--date`).
 
 6. **GitHub Issue #2 body updated**:
    ```
@@ -721,7 +729,7 @@ Central state database tracking all tasks across systems.
     "of_task_id": "kU7YLg_riXV",
     "of_task_name": "Design ad creative (a1f4c892)",
     "status": "open|completed|dropped",
-    "task_type": "github_task|github_comment_task|vault_task|project",
+    "task_type": "vault_task|github_task|github_comment_task|github_project|project",
     "parent_task_hash": "e5b7a291",
     "due_date": "2026-05-25",
     "synced_at": "2026-05-15T10:30:00.000000",
@@ -738,7 +746,7 @@ Central state database tracking all tasks across systems.
 | `of_task_id` | string | OmniFocus internal task ID; "pending" if not yet added |
 | `of_task_name` | string | Task name as displayed in OmniFocus with hash |
 | `status` | enum | "open", "completed", or "dropped" |
-| `task_type` | enum | Identifies source domain for filtering |
+| `task_type` | enum | Identifies source domain: `vault_task`, `github_task`, `github_comment_task`, `github_project`, `project` |
 | `parent_task_hash` | string | TaskHash of parent task; omitted if top-level |
 | `due_date` | date | ISO format YYYY-MM-DD; omitted if no due date |
 | `synced_at` | datetime | ISO format with microseconds; initial sync timestamp |
@@ -795,6 +803,7 @@ and normalizing all incomplete tasks from the result.
       "name": "Buy groceries",
       "note": "",
       "due_date": null,
+      "added_date": "2026-05-01",
       "parent_name": "Later"
     },
     {
@@ -802,6 +811,7 @@ and normalizing all incomplete tasks from the result.
       "name": "Team standup",
       "note": "",
       "due_date": "2026-05-10",
+      "added_date": null,
       "parent_name": null
     }
   ]
@@ -816,12 +826,14 @@ and normalizing all incomplete tasks from the result.
 | `name` | string | Yes | Task name as displayed in OmniFocus |
 | `note` | string | No | Task note field content |
 | `due_date` | date\|null | No | ISO format YYYY-MM-DD; null if no due date |
+| `added_date` | date\|null | No | ISO format YYYY-MM-DD; OmniFocus task creation date. Determines which Daily Note the task is written to. Falls back to today (or `--date`) if absent or null. |
 | `parent_name` | string\|null | No | Name of the containing Project; null for true Inbox tasks |
 
 **Notes:**
 - Include ALL incomplete tasks — Inbox tasks AND tasks inside every Project.
 - Tasks already containing a TaskHash (`(XXXXXXXX)` suffix) are automatically skipped.
 - `parent_name` is the Project name exactly as displayed in OmniFocus (hash suffix included if present).
+- `added_date` controls which Daily Note receives the task — tasks created on different days go to different notes in one sync run.
 
 ---
 
@@ -939,11 +951,9 @@ python3 sync_to_omnifocus.py [--dry-run] [--verbose]
 3. Validate all tasks (required fields, hash format)
 4. For each task with parentTaskHash: resolve → OmniFocus task ID
 5. Generate `precheck_requests.json` — existence checks for Claude
-6. Generate `tasks_resolved.json` and `mcp_batch_add_request.json`
 
 **Output files:**
-- `precheck_requests.json` — Claude reads this and runs `get_task_by_id` for every item
-- `mcp_batch_add_request.json` — filtered batch after pre-existence check
+- `precheck_requests.json` — Claude reads this and runs `get_task_by_id` for every item; Claude filters the batch and calls `batch_add_items` directly
 
 **⚠️ Pre-existence check (mandatory):**
 
@@ -963,40 +973,6 @@ For each item in precheck_requests.json["checks"]:
 
 Skipping this check is the root cause of duplicate project creation.
 
-### update_sync_state.py
-
-State management automation after MCP execution.
-
-**Usage:**
-```bash
-python3 update_sync_state.py [--dry-run] [--verbose]
-```
-
-**Process:**
-1. Load `tasks_resolved.json`
-2. Extract TaskHash from each task
-3. Add/update entries in `sync_state.json`
-4. Clear `tasks_to_sync.json` (queue management)
-5. Generate completion report
-
-### run_complete_sync.py
-
-Master orchestrator for the complete forward sync pipeline.
-
-**Usage:**
-```bash
-python3 run_complete_sync.py             # Execute complete workflow
-python3 run_complete_sync.py --check-only  # View current state only
-python3 run_complete_sync.py --cleanup    # Reset for debugging
-```
-
-**Process:**
-1. Check current state (tasks_to_sync.json)
-2. Run sync_to_omnifocus.py (resolve + validate)
-3. Output MCP execution instructions for Claude
-4. Run update_sync_state.py (update state + clear queue)
-5. Generate completion report
-
 ### scan_omnifocus_inbox.py
 
 Scans ALL OmniFocus tasks (Inbox + every Project) for TaskHash-less tasks and routes each
@@ -1011,6 +987,9 @@ python3 scan_omnifocus_inbox.py --tasks all_tasks_raw.json [--date YYYY-MM-DD] [
 python3 scan_omnifocus_inbox.py --inbox-tasks inbox_tasks_raw.json
 ```
 
+`--date` sets the **fallback date** used when a task has no `added_date` field (default: today).
+Tasks with `added_date` always use their own date regardless of `--date`.
+
 **Input format (`all_tasks_raw.json`):**
 Claude normalizes the output of `dump_database()` into this format before calling the script:
 ```json
@@ -1022,30 +1001,33 @@ Claude normalizes the output of `dump_database()` into this format before callin
       "name": "Buy groceries",
       "note": "",
       "due_date": null,
+      "added_date": "2026-05-01",
       "parent_name": "Later"
     }
   ]
 }
 ```
-`parent_name` = name of the containing Project (omit or `null` for true Inbox tasks).
+- `added_date` = OmniFocus task creation date (YYYY-MM-DD). Determines which Daily Note the task is written to.
+- `parent_name` = name of the containing Project (omit or `null` for true Inbox tasks).
 
 **Routing rules:**
 
 | Condition | Destination |
 |-----------|-------------|
 | Task has no hash + parent Project has a TaskHash that is a `github_project` in sync_state | → GitHub Issue body |
-| Task has no hash + parent Project has no TaskHash (native project like "Later") | → Vault Daily Note |
-| Task has no hash + no parent (true Inbox task) | → Vault Daily Note |
+| Task has no hash + parent Project has no TaskHash (native project like "Later") | → Vault Daily Note for `added_date` (fallback: today) |
+| Task has no hash + no parent (true Inbox task) | → Vault Daily Note for `added_date` (fallback: today) |
 
 **Process:**
 1. Load all tasks from `all_tasks_raw.json`
 2. Filter out tasks that already have a TaskHash
-3. For each hashless task, classify by inspecting `parent_name`
-4. Generate TaskHash for each classified task
-5. Add vault tasks to today's Vault Daily Note
-6. Update sync_state.json
-7. Output `inbox_rename_requests.json` for Claude to call `edit_item`
-8. Output `github_issue_additions.json` for Claude to add tasks to GitHub Issues
+3. Skip OmniFocus container tasks (task name == parent project name)
+4. For each hashless task, classify by inspecting `parent_name`
+5. Generate TaskHash for each classified task; `source_id` encodes each task's target Daily Note path
+6. Group vault tasks by `added_date`; write each group to the correct Daily Note
+7. Update sync_state.json
+8. Output `inbox_rename_requests.json` for Claude to call `edit_item`
+9. Output `github_issue_additions.json` for Claude to add tasks to GitHub Issues
 
 **Output files:**
 - `inbox_rename_requests.json` — `edit_item` calls to append TaskHash to OmniFocus task names
@@ -1368,7 +1350,7 @@ Completed Today:
 
 ## Implemented Features & Status
 
-### ✅ Completed (v2.7 - May 7, 2026)
+### ✅ Completed (v2.8 - May 10, 2026)
 
 - [x] Immutable TaskHash generation (CRC32)
 - [x] GitHub Issue → OmniFocus Project conversion
@@ -1389,30 +1371,29 @@ Completed Today:
   - prepare_sync.py automatically appends TaskHash to Vault task lines
   - Synchronizes Vault with OmniFocus in real-time
   - Ensures consistency across all sync cycles
-
-### 📋 Future Enhancements
-
-- [ ] Optional scheduled sync (currently manual-only by design)
-- [ ] Conflict resolution (task modified in multiple systems)
-- [ ] Tag propagation (sync tags between OmniFocus and GitHub labels)
-- [ ] Performance optimization for large issue sets
-- [ ] Web dashboard for sync status monitoring
-- [ ] Bulk operations (sync multiple issues at once)
+- [x] **Grandchild task detection fix** (May 10, 2026)
+  - detect_existing_issue_updates() now uses recursive ancestor traversal
+  - Grandchild tasks (parent is a github_task, not directly a github_project) are correctly identified as already-synced
+  - Prevents grandchildren from being re-reported as new tasks on every sync
+- [x] **OmniFocus creation date routing for Vault tasks** (May 10, 2026)
+  - scan_omnifocus_inbox.py uses each task's `added_date` (OmniFocus creation date) as the target Daily Note
+  - Tasks created on different dates are grouped and written to separate Daily Notes in one run
+  - Falls back to today (or `--date`) when `added_date` is absent or null
 
 ---
 
 ## Implementation Status
 
-### Current State (v2.7 - May 7, 2026)
+### Current State (v2.8 - May 10, 2026)
 
 #### ✅ Fully Working
 
-| Flow | Status | Component | Trigger |
-|------|--------|-----------|---------|
-| Vault Daily Notes → OmniFocus | ✅ Complete | `prepare_sync.py` + MCP | Manual sync |
-| GitHub Issues → OmniFocus | ✅ Complete | `prepare_sync.py` + MCP | Manual sync |
-| OmniFocus (completed) → Vault/GitHub | ✅ Complete | `reverse_sync.py` | Manual sync |
-| OmniFocus Inbox → Vault Daily Note | ✅ Complete | `scan_omnifocus_inbox.py` | Manual sync |
+| Flow                                 | Status     | Component                 | Trigger     |
+| ------------------------------------ | ---------- | ------------------------- | ----------- |
+| Vault Daily Notes → OmniFocus        | ✅ Complete | `prepare_sync.py` + MCP   | Manual sync |
+| GitHub Issues → OmniFocus            | ✅ Complete | `prepare_sync.py` + MCP   | Manual sync |
+| OmniFocus (completed) → Vault/GitHub | ✅ Complete | `reverse_sync.py`         | Manual sync |
+| OmniFocus Inbox → Vault Daily Note   | ✅ Complete | `scan_omnifocus_inbox.py` | Manual sync |
 
 #### Sync Trigger
 
@@ -1435,18 +1416,6 @@ No scheduled/automatic sync. Manual trigger only by design.
 
 3. **Performance**: Not optimized for large task sets
    - Concern: May need optimization at 1000+ tasks
-
----
-
-## Roadmap
-
-### Future Enhancements
-
-- [ ] Tag propagation (GitHub labels ↔ OmniFocus tags)
-- [ ] GitHub issue state sync (open/closed)
-- [ ] Conflict detection and resolution
-- [ ] Performance optimization for 1000+ tasks
-- [ ] GitHub comment integration improvements
 
 ---
 
@@ -1517,6 +1486,6 @@ When modifying TaskHashSyncSystem:
 
 ---
 
-**Version:** 2.5  
-**Last Updated:** 2026-05-05  
+**Version:** 2.8  
+**Last Updated:** 2026-05-10  
 **Maintained By:** [@x5gtrn](https://daisuke.masuda.tokyo)
