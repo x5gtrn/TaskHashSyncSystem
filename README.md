@@ -44,6 +44,58 @@ The TaskHashSyncSystem enables seamless bidirectional synchronization of tasks a
 
 ---
 
+## Requirements
+
+### Repository / Vault Placement (IdeaverseLIFE Conventions)
+- This system (TaskHashSyncSystem) MUST live at: **`x/Scripts/TaskHashSyncSystem/`**
+- This layout is required to comply with the **IdeaverseLIFE Vault** folder structure, naming conventions, and operating rules  
+  - Reference: https://github.com/x5gtrn/IdeaverseLIFE
+- Because parts of the system rely on **vault-relative paths** (e.g., embedded into `source_id`), relocating this directory may impact scripts/config and the integrity of existing `sync_state.json` mappings; validate carefully before moving
+
+### Runtime
+- **Python**: 3.11+ (recommended)
+- **OS**: macOS (local OmniFocus automation is required)
+
+### Required Tools / Dependencies
+- **OmniFocus** (macOS app)
+- **Claude Desktop** (MCP client; used as the non-Cloudflare path for AI-driven OmniFocus integration)
+- **omnifocus-mcp-enhanced** (MCP server that provides `local-omnifocus-mcp`)  
+  - `local-omnifocus-mcp` details / reference implementation: https://github.com/jqlts1/omnifocus-mcp-enhanced
+- **Obsidian Tasks plugin** (required for vault-wide task queries / dashboards)
+- **Claudian** (required; used as the Obsidian-side integration layer for Claude-driven workflows)
+- **GitHub CLI**: `gh` (used by `prepare_sync.py` to fetch Issues)
+- **Git** (recommended for managing changes to scripts/Vault content)
+
+### CLAUDE.md (Required)
+- The repository/vault MUST include a `CLAUDE.md` that documents:
+  - How to run the sync workflow (Forward → Reverse → Inbox Scan)
+  - Which MCP server/tools are required (`local-omnifocus-mcp`)
+  - Vault conventions (Daily Note paths, task formatting, indentation)
+  - Safety rules (idempotency, mandatory precheck, `sync_state.json` cautions)
+
+### Claude Desktop vs. Cloudflare-based Remote Access (Context)
+- The Cloudflare Tunnel approach (as described in: https://daisuke.masuda.tokyo/article-2026-01-01-1540) is intended to enable **secure remote access** to a Mac running OmniFocus + an MCP server.
+- This TaskHashSyncSystem assumes a **local** MCP setup (`local-omnifocus-mcp`) operated via **Claude Desktop**.
+- In other words, **Claude Desktop is the non-Cloudflare path** for achieving an AI-driven OmniFocus integration: the MCP client runs locally and talks to the local MCP server, without exposing OmniFocus over the internet.
+
+### Authentication / Permissions
+- **GitHub**: `gh auth login` completed (read/write access to the target repositories)
+- **macOS Automation Permissions**:
+  - Claude Desktop (and the process running `omnifocus-mcp-enhanced`) must be granted automation permission to control OmniFocus
+- **OmniFocus**: Must be controllable via MCP (Claude calls `batch_add_items`, `edit_item`, `filter_tasks`, etc.)
+
+### Vault Conventions (Assumptions)
+- Daily Notes location: `Calendar/Daily/YYYY/MM/YYYY-MM-DD.md`
+- Tasks must use Markdown checkboxes: `- [ ] ...` / `- [x] ...`
+- TaskHash format is the trailing suffix **` (xxxxxxxx)`** (8 lowercase hex chars)
+- Avoid mixing tabs/spaces for hierarchy indentation; standardize (recommended: tabs)
+
+### Data Files
+- `sync_state.json` is a persistent state DB (**deleting/resetting it can cause duplicates**)
+- `update_issue_body.py` is the **only supported way** to edit GitHub Issue bodies (atomic diff-based updates)
+
+---
+
 ## Core Concept: TaskHash
 
 ### Definition
