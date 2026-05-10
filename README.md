@@ -2,6 +2,9 @@
 
 A **bidirectional task synchronization system** that synchronizes tasks across OmniFocus, GitHub Issues, and Obsidian Vault using immutable CRC32-based task identification.
 
+Video: [The Task Management with TaskHashSyncSystem: Seamless OmniFocus Integration with GitHub & Obsidian
+](https://www.youtube.com/watch?v=1hmfa36sJDg)
+
 ## Table of Contents
 
 1. [System Overview](#system-overview)
