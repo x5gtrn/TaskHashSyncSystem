@@ -11,13 +11,17 @@ and routes them to the correct destination based on parent Project info:
        → classify as github_issue_child → add to GitHub Issue body
      - Parent Project has NO TaskHash (= native OmniFocus project like "Later")
        OR task has no parent (= Inbox task)
-       → classify as vault_task → add to today's Vault Daily Note
+       → classify as vault_task → add to the Vault Daily Note for the task's
+         OmniFocus creation date (added_date). Falls back to today if absent.
   3. Generate TaskHash for each classified task
   4. Write sync_state.json, inbox_rename_requests.json, github_issue_additions.json
 
 Usage:
   python3 scan_omnifocus_inbox.py --tasks all_tasks_raw.json [--date YYYY-MM-DD] [--dry-run] [--verbose]
   python3 scan_omnifocus_inbox.py --inbox-tasks inbox_tasks_raw.json  # deprecated alias
+
+  --date sets the fallback date used when a task has no added_date field.
+  Default fallback: today.
 
 Input (all_tasks_raw.json) is created by Claude from mcp__omnifocus-local-server__dump_database.
 Claude normalizes the raw dump into the following format:
@@ -29,10 +33,14 @@ Claude normalizes the raw dump into the following format:
         "name": "Buy groceries",
         "note": "",
         "due_date": null,
+        "added_date": "2026-05-01",
         "parent_name": "Later"
       }
     ]
   }
+  added_date = ISO date (YYYY-MM-DD) when the task was created in OmniFocus.
+               Determines which Daily Note the task is written to.
+               Omit or set null to fall back to today (or --date override).
   parent_name = name of the containing Project (omit or null for true Inbox tasks)
 
 Output:
@@ -90,7 +98,10 @@ def load_tasks(path: Path) -> List[Dict]:
     """Load OmniFocus tasks from all_tasks_raw.json (or inbox_tasks_raw.json).
 
     Claude normalizes dump_database() output into this format before calling the script:
-      {"tasks": [{"id": "...", "name": "...", "due_date": null, "parent_name": "ProjectName"}, ...]}
+      {"tasks": [{"id": "...", "name": "...", "due_date": null, "added_date": "YYYY-MM-DD", "parent_name": "ProjectName"}, ...]}
+
+    added_date (YYYY-MM-DD or null): OmniFocus task creation date.
+    Determines which Daily Note the task is written to.
 
     Also accepts a plain list:
       [{"id": "...", "name": "...", ...}, ...]
@@ -237,7 +248,6 @@ def detect_new_tasks(inbox_tasks: List[Dict], state: Dict[str, Any]) -> List[Dic
 def classify_and_route_tasks(
     new_tasks: List[Dict],
     state: Dict[str, Any],
-    daily_note_relative_path: str
 ) -> Tuple[List[Dict], List[Dict]]:
     """
     Classify TaskHash-less tasks and route them to either GitHub or Vault.
@@ -298,22 +308,30 @@ def generate_github_task_hashes(
 
 def generate_vault_task_hashes(
     vault_tasks: List[Dict],
-    daily_note_relative_path: str
+    fallback_date: str,
 ) -> List[Dict]:
     """
     Generate TaskHash for Vault tasks (both TaskHashless Project children and Inbox tasks).
 
+    Each task is written to the Daily Note for its OmniFocus creation date (added_date).
+    If added_date is absent or null, fallback_date is used instead (typically today).
+
     Each result contains:
       - classification info (parent_name, etc.)
       - task_hash, source_id, new_name
+      - target_date: the Daily Note date this task will be written to
     """
     enriched = []
     for item in vault_tasks:
         task = item["task"]
         original_name = task["name"].strip()
 
-        # Generate source_id for this Vault task
-        source_id = make_vault_source_id(daily_note_relative_path, original_name)
+        # Use OmniFocus task creation date; fall back to today (or --date override)
+        target_date = task.get("added_date") or fallback_date
+        daily_relative = get_daily_note_relative_path(target_date)
+
+        # source_id encodes the actual target Daily Note path
+        source_id = make_vault_source_id(daily_relative, original_name)
         task_hash = compute_hash(source_id)
         new_name = f"{original_name} ({task_hash})"
 
@@ -325,6 +343,7 @@ def generate_vault_task_hashes(
             "source_id": source_id,
             "of_task_id": task.get("id", ""),
             "due_date": task.get("due_date"),
+            "target_date": target_date,  # which Daily Note to write this task to
         })
 
     return enriched
@@ -776,7 +795,10 @@ def main() -> int:
         "--date",
         type=str,
         default=None,
-        help="Override today's date as YYYY-MM-DD (default: today)",
+        help=(
+            "Fallback date (YYYY-MM-DD) used when a task has no added_date field. "
+            "Default: today. Tasks with added_date always use their own date."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -790,11 +812,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # Determine target date
-    target_date = args.date or date.today().isoformat()
+    # Fallback date: used when a task has no added_date field
+    fallback_date = args.date or date.today().isoformat()
 
     if args.verbose:
-        print(f"Target date: {target_date}")
+        print(f"Fallback date: {fallback_date}")
         print(f"Dry run: {args.dry_run}")
 
     # Resolve input file path (--tasks takes precedence; --inbox-tasks is deprecated alias)
@@ -834,16 +856,12 @@ def main() -> int:
         print(f"  • {t['name']}{parent_info}")
     print()
 
-    # Compute paths
-    daily_relative = get_daily_note_relative_path(target_date)
-    daily_abs = get_daily_note_path(target_date)
-
     if args.verbose:
-        print(f"Daily Note: {daily_relative}")
+        print(f"Fallback Daily Note date: {fallback_date}")
 
     # Classify and route tasks
     github_classified, vault_classified = classify_and_route_tasks(
-        new_tasks, state, daily_relative
+        new_tasks, state
     )
 
     print(f"Classification Results:")
@@ -858,7 +876,7 @@ def main() -> int:
 
     # Generate hashes for each classification
     github_enriched = generate_github_task_hashes(github_classified)
-    vault_enriched = generate_vault_task_hashes(vault_classified, daily_relative)
+    vault_enriched = generate_vault_task_hashes(vault_classified, fallback_date)
 
     if args.verbose or args.dry_run:
         print("TaskHash assignments (GitHub):")
@@ -866,21 +884,14 @@ def main() -> int:
             print(f"  {t['original_name']} → ({t['task_hash']}) [Issue #{t['issue_number']}]")
         print("TaskHash assignments (Vault):")
         for t in vault_enriched:
-            print(f"  {t['original_name']} → ({t['task_hash']})")
+            print(f"  {t['original_name']} → ({t['task_hash']}) [target: {t['target_date']}]")
         print()
 
-    # Update Daily Note (only with Vault tasks)
-    if daily_abs.exists():
-        with open(daily_abs, "r", encoding="utf-8") as f:
-            note_content = f.read()
-        if args.verbose:
-            print(f"Updating existing Daily Note: {daily_relative}")
-    else:
-        note_content = create_daily_note_content(target_date)
-        if args.verbose:
-            print(f"Creating new Daily Note: {daily_relative}")
-
-    updated_content = insert_tasks_into_daily_note(note_content, vault_enriched)
+    # Group vault tasks by target Daily Note date
+    from collections import defaultdict as _defaultdict
+    vault_by_date: Dict[str, List[Dict]] = _defaultdict(list)
+    for t in vault_enriched:
+        vault_by_date[t["target_date"]].append(t)
 
     # Build state entries for both GitHub and Vault
     timestamp = datetime.now().isoformat()
@@ -895,10 +906,12 @@ def main() -> int:
                 print(f"    Issue #{t['issue_number']}: - [ ] {t['original_name']} ({t['task_hash']})")
             print()
 
-        print(f"[2] Vault Daily Note: {daily_relative}")
-        if vault_enriched:
-            print(f"    +{len(vault_enriched)} task(s):")
-            for t in vault_enriched:
+        print(f"[2] Vault Daily Notes ({len(vault_by_date)} date(s)):")
+        for note_date in sorted(vault_by_date):
+            note_relative = get_daily_note_relative_path(note_date)
+            tasks_for_date = vault_by_date[note_date]
+            print(f"    {note_relative} (+{len(tasks_for_date)} task(s)):")
+            for t in tasks_for_date:
                 due_str = f" 📅 {t['due_date']}" if t.get('due_date') else ''
                 print(f"      - [ ] {t['new_name']}{due_str}")
         print()
@@ -928,13 +941,29 @@ def main() -> int:
         print("\n(No files written — dry run)")
         return 0
 
-    # Write Daily Note (if there are Vault tasks)
+    # Write each Daily Note grouped by target date
     if vault_enriched:
-        write_daily_note(daily_abs, updated_content)
-        print(f"✓ Updated Vault Daily Note: {daily_relative} (+{len(vault_enriched)} tasks)")
+        for note_date in sorted(vault_by_date):
+            tasks_for_date = vault_by_date[note_date]
+            note_abs = get_daily_note_path(note_date)
+            note_relative = get_daily_note_relative_path(note_date)
+
+            if note_abs.exists():
+                with open(note_abs, "r", encoding="utf-8") as f:
+                    note_content = f.read()
+                if args.verbose:
+                    print(f"Updating existing Daily Note: {note_relative}")
+            else:
+                note_content = create_daily_note_content(note_date)
+                if args.verbose:
+                    print(f"Creating new Daily Note: {note_relative}")
+
+            updated_content = insert_tasks_into_daily_note(note_content, tasks_for_date)
+            write_daily_note(note_abs, updated_content)
+            print(f"✓ Updated Vault Daily Note: {note_relative} (+{len(tasks_for_date)} tasks)")
     else:
         if args.verbose:
-            print(f"  (No Vault tasks to add to Daily Note)")
+            print("  (No Vault tasks to add to Daily Note)")
 
     # Sync due dates: OmniFocus → Vault (existing tasks)
     due_date_updates = sync_due_dates_to_vault(all_tasks, state, args.dry_run)

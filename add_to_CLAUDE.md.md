@@ -10,6 +10,45 @@ A **bidirectional task synchronization system** with three distinct sync domains
 
 Each task receives a unique **TaskHash** (e.g., `(73801d05)`) that **never changes**, regardless of task content modifications. This ensures reliable tracking across systems.
 
+## Claude Operational Rules
+
+### ⛔ General Prohibitions (Obsidian Anti-patterns)
+
+- ❌ **Import / dump** old notes or external content without explicit request.
+- ❌ **Create excessive folders** — structure emerges; it is not imposed.
+- ❌ **Add plugins or complex syntax** unprompted (Dataview, Templater, Canvas, etc.).
+- ❌ **Overwrite human-authored content** with AI rewrites without confirmation.
+- ❌ **Use absolute paths** when referencing vault files — always use wikilinks `[[note]]`.
+
+### ⛔ FORBIDDEN: Direct GitHub Issue Body Construction
+
+**Claude MUST NOT call `gh issue edit --body "..."` with a manually assembled body string.**
+
+```bash
+# ❌ FORBIDDEN — Claude constructing body manually
+gh issue edit 3 --body "- [x] Task A\n- [ ] Task B\n- [ ] Task C"
+
+# ✅ REQUIRED — Use update_issue_body.py for every body change
+python3 x/Scripts/TaskHashSyncSystem/update_issue_body.py --issue 3 --add-task "New Task (hash)"
+python3 x/Scripts/TaskHashSyncSystem/update_issue_body.py --issue 3 --remove-task "c329bc12"
+python3 x/Scripts/TaskHashSyncSystem/update_issue_body.py --issue 3 --check-task "51a9ee37"
+```
+
+**Why**: Manual body construction forces Claude to hold the entire Issue body in context and reassemble it — an error-prone operation where tasks from other Issues can be inadvertently mixed in. `update_issue_body.py` fetches the current body from GitHub and applies **only the specified diff**, leaving all other lines untouched.
+
+**Available operations in `update_issue_body.py`**:
+
+| Flag | Effect |
+|------|--------|
+| `--add-task "Task (hash)"` | Append new top-level task |
+| `--add-child "Parent (hash)" "Child (hash)"` | Insert child after parent and its existing children |
+| `--remove-task "hash"` | Remove line containing `(hash)` |
+| `--check-task "hash"` | `[ ]` → `[x]` |
+| `--uncheck-task "hash"` | `[x]` → `[ ]` |
+| `--dry-run` | Preview diff without writing |
+
+**Always use `--dry-run` first** when making multiple changes, to verify the diff before writing.
+
 ## Core Components
 
 ### 1. TaskHash - Immutable Task Identification
@@ -112,19 +151,19 @@ Vault Daily Note:
 
 **Example**:
 ```
-GitHub Issue #3: Kakoima開発 (17885c2f)
-- [x] フィードバックページ作成 (51a9ee37) ✅
+GitHub Issue #3: App Development (17885c2f)
+- [x] Build feedback page (51a9ee37) ✅
 
 Result in OmniFocus:
-  P: Kakoima開発 (17885c2f) [status: ACTIVE, NOT completed]
-     • フィードバックページ作成 (51a9ee37) ✅
+  P: App Development (17885c2f) [status: ACTIVE, NOT completed]
+     • Build feedback page (51a9ee37) ✅
 
 Even though the only child task is complete, the Project remains ACTIVE.
 When a new task is added:
-  P: Kakoima開発 (17885c2f) [status: ACTIVE]
-     • フィードバックページ作成 (51a9ee37) ✅
-     • バグフィックス (251383dc) [NEW]
-         • Before & After の文字は不要 (7f1603d8)
+  P: App Development (17885c2f) [status: ACTIVE]
+     • Build feedback page (51a9ee37) ✅
+     • Bug fixes (251383dc) [NEW]
+         • Remove Before & After label text (7f1603d8)
 
 The Project's active status is preserved — no reactivation needed.
 ```
@@ -432,8 +471,10 @@ and route each one to the correct destination.
 1. Claude calls `mcp__omnifocus-local-server__dump_database`
 2. Claude normalizes all incomplete tasks into `all_tasks_raw.json`:
    ```json
-   {"tasks": [{"id": "OFTaskID", "name": "Task Name", "due_date": null, "parent_name": "Later"}]}
+   {"tasks": [{"id": "OFTaskID", "name": "Task Name", "due_date": null, "added_date": "YYYY-MM-DD", "parent_name": "Later"}]}
    ```
+   `added_date` = ISO date (YYYY-MM-DD) when the task was created in OmniFocus.
+   Determines which Daily Note the task is written to (falls back to today if absent or null).
 3. Claude runs `python3 scan_omnifocus_inbox.py --tasks all_tasks_raw.json`
     - Filters tasks without TaskHash
     - Generates TaskHash using `task_hash.py`
@@ -450,8 +491,8 @@ TaskHash-less Task (no hash in name):
 ├─ Has parent Project?
 │  ├─ YES: Parent Project has TaskHash? (= GitHub Issue Project in sync_state)
 │  │  ├─ YES → github_issue_child → Add to GitHub Issue body
-│  │  └─ NO  → vault_task → Add to today's Vault Daily Note
-│  └─ NO (true Inbox task) → vault_task → Add to today's Vault Daily Note
+│  │  └─ NO  → vault_task → Add to Daily Note for task's added_date (fallback: today)
+│  └─ NO (true Inbox task) → vault_task → Add to Daily Note for task's added_date (fallback: today)
 ```
 
 **Important Notes**:
@@ -485,13 +526,13 @@ TaskHash-less Task (no hash in name):
 **Example Scenario**:
 ```
 OmniFocus All Tasks (TaskHash-less):
-  • Implement OAuth flow (no hash, parent: "転職活動: フリーランスから正規雇用へ (60c6d084)")
-  • Clean desk (no hash, parent: "Later")
-  • Buy milk (no hash, no parent / Inbox)
+  • Implement OAuth flow  (no hash, added: 2026-05-08, parent: "Job Search Q3 (60c6d084)")
+  • Clean desk            (no hash, added: 2026-05-07, parent: "Later")
+  • Buy milk              (no hash, added: 2026-05-06, no parent / Inbox)
 
 Processing:
   Task A: "Implement OAuth flow"
-    → parent_name = "転職活動: フリーランスから正規雇用へ (60c6d084)"
+    → parent_name = "Job Search Q3 (60c6d084)"
     → extract_hash → "60c6d084"
     → sync_state["60c6d084"].task_type = "github_project"  ← GitHub Issue Project
     → CLASSIFY: github_issue_child (Issue #2)
@@ -501,14 +542,14 @@ Processing:
   Task B: "Clean desk"
     → parent_name = "Later"
     → extract_hash("Later") → None  ← no TaskHash in parent name
-    → CLASSIFY: vault_task
-    → ACTION: Add to today's Vault Daily Note: - [ ] Clean desk (hash)
+    → CLASSIFY: vault_task, added_date = "2026-05-07"
+    → ACTION: Add to Calendar/Daily/2026/05/2026-05-07.md: - [ ] Clean desk (hash)
     → Rename OmniFocus task: "Clean desk" → "Clean desk (hash)"
 
   Task C: "Buy milk"
-    → no parent (Inbox task)
+    → no parent (Inbox task), added_date = "2026-05-06"
     → CLASSIFY: vault_task
-    → ACTION: Add to today's Vault Daily Note: - [ ] Buy milk (hash)
+    → ACTION: Add to Calendar/Daily/2026/05/2026-05-06.md: - [ ] Buy milk (hash)
     → Rename OmniFocus task: "Buy milk" → "Buy milk (hash)"
 ```
 
@@ -578,12 +619,14 @@ When the user says **"sync tasks"** or equivalent command:
 - Call MCP: `mcp__omnifocus-local-server__dump_database`
 - Extract ALL incomplete tasks (Inbox + every Project) and normalize into **`all_tasks_raw.json`**:
   ```json
-  {"tasks": [{"id": "OFTaskID", "name": "Task Name", "due_date": null, "parent_name": "ProjectName"}]}
+  {"tasks": [{"id": "OFTaskID", "name": "Task Name", "due_date": null, "added_date": "YYYY-MM-DD", "parent_name": "ProjectName"}]}
   ```
-  Include `parent_name` = the containing Project's name (omit or `null` for true Inbox tasks)
+    - `parent_name` = the containing Project's name (omit or `null` for true Inbox tasks)
+    - `added_date` = OmniFocus task creation date (ISO YYYY-MM-DD). The script writes the task
+      to the Daily Note for this date. Falls back to today if absent or null.
 - Run `python3 scan_omnifocus_inbox.py --tasks all_tasks_raw.json`
 - Routing rules applied by the script:
-    - Task has **no TaskHash** AND parent Project **has no TaskHash** (or no parent) → add to today's Vault Daily Note
+    - Task has **no TaskHash** AND parent Project **has no TaskHash** (or no parent) → add to the Vault Daily Note for `added_date` (fallback: today)
     - Task has **no TaskHash** AND parent Project **has a TaskHash** (= GitHub Issue Project) → add to GitHub Issue body
 - For each new task, call MCP: `mcp__omnifocus-local-server__edit_item` to append TaskHash to OmniFocus task name
 
@@ -800,9 +843,10 @@ This ensures hash stability even if task metadata changes.
 - ✅ **Automatic GitHub Issue TaskHash generation** (detect missing hashes, auto-process)
 - ✅ **TaskHash-less task routing** (parent-aware classification & auto-sync)
     - GitHub Issue Project children → Auto-add to GitHub Issue
-    - TaskHashless Project children → Auto-add to Vault Daily Note
-    - Inbox standalone → Auto-add to Vault Daily Note
+    - TaskHashless Project children → Auto-add to Vault Daily Note for task's creation date
+    - Inbox standalone → Auto-add to Vault Daily Note for task's creation date
     - All routes ensure TaskHash assignment
+- ✅ **OmniFocus creation date routing** (added_date → target Daily Note, not today)
 
 ## Files Location
 
@@ -876,7 +920,8 @@ Uses `omnifocus-local-server` MCP with these tools:
     - Inbox standalone → Add to Vault Daily Note
     - All routes must result in TaskHash assignment
 12. **No orphaned tasks**: Every task in OmniFocus must have a TaskHash and source location
-13. **OmniFocus native Project container exclusion**: Every OmniFocus Project has an identically-named first child task acting as a container (e.g., project "あとでやる - Later" has child "あとでやる - Later"). These containers MUST NEVER receive a TaskHash and MUST NEVER be added to the Vault Daily Note. Detection rule: `remove_hash(task_name).strip() == remove_hash(parent_name).strip()` → skip entirely in `scan_omnifocus_inbox.py`.
+13. **OmniFocus native Project container exclusion**: Every OmniFocus Project has an identically-named first child task acting as a container (e.g., project "Later" has a child task also named "Later"). These containers MUST NEVER receive a TaskHash and MUST NEVER be added to the Vault Daily Note. Detection rule: `remove_hash(task_name).strip() == remove_hash(parent_name).strip()` → skip entirely in `scan_omnifocus_inbox.py`.
+14. **OmniFocus task creation date (added_date) determines Daily Note target**: Vault tasks are written to the Daily Note for the date they were added in OmniFocus (`added_date` field in `all_tasks_raw.json`), not today's date. Falls back to today (or `--date` override) when `added_date` is absent or null.
 
 ## Current Implementation Status
 

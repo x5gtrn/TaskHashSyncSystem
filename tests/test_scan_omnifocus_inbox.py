@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Tests for scan_omnifocus_inbox.py — routing, hash generation, Daily Note I/O,
-and due-date sync.
+added_date routing, and due-date sync.
 
 Run:  python3 -m unittest tests.test_scan_omnifocus_inbox  (from TaskHashSyncSystem/)
   or: python3 -m unittest discover -s tests
@@ -19,6 +19,7 @@ import scan_omnifocus_inbox as soi
 from scan_omnifocus_inbox import (
     classify_task_by_parent,
     detect_new_tasks,
+    generate_vault_task_hashes,
     insert_tasks_into_daily_note,
     _read_vault_due_date,
     _find_file_containing_hash,
@@ -603,6 +604,172 @@ class TestPathHelpers(unittest.TestCase):
         self.assertIn("## Tasks", content)
         self.assertIn("## Projects", content)
         self.assertIn("---", content)
+
+
+# ─── added_date routing ───────────────────────────────────────────────────────
+
+class TestAddedDateRouting(unittest.TestCase):
+    """
+    generate_vault_task_hashes() must route each task to the Daily Note that
+    corresponds to the task's OmniFocus creation date (added_date), not today.
+
+    When added_date is absent or null, the fallback_date is used instead.
+    """
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    def _make_vault_item(self, name: str, added_date=None, due_date=None):
+        """Build a classify_task_by_parent()-style dict for a vault_task."""
+        task = {
+            "id": "of_" + name.replace(" ", "_"),
+            "name": name,
+            "due_date": due_date,
+            "parent_name": None,
+        }
+        if added_date is not None:
+            task["added_date"] = added_date
+        return {
+            "task": task,
+            "classification": "vault_task",
+            "parent_name": None,
+            "parent_hash": None,
+            "parent_source_id": None,
+            "issue_number": None,
+        }
+
+    # ── target_date selection ─────────────────────────────────────────────
+
+    def test_added_date_used_as_target_date(self):
+        """Task with added_date='2026-05-01' must target 2026-05-01 Daily Note."""
+        items = [self._make_vault_item("Book dentist appointment", added_date="2026-05-01")]
+        enriched = generate_vault_task_hashes(items, fallback_date="2026-05-10")
+        self.assertEqual(enriched[0]["target_date"], "2026-05-01")
+
+    def test_null_added_date_falls_back_to_fallback(self):
+        """Task with added_date=null must use fallback_date."""
+        items = [self._make_vault_item("Buy printer paper", added_date=None)]
+        enriched = generate_vault_task_hashes(items, fallback_date="2026-05-10")
+        self.assertEqual(enriched[0]["target_date"], "2026-05-10")
+
+    def test_absent_added_date_falls_back_to_fallback(self):
+        """Task dict with no added_date key at all must use fallback_date."""
+        # _make_vault_item without added_date kwarg omits the key entirely
+        item = self._make_vault_item("Pick up dry cleaning")
+        # Confirm the key is absent
+        self.assertNotIn("added_date", item["task"])
+        enriched = generate_vault_task_hashes([item], fallback_date="2026-05-09")
+        self.assertEqual(enriched[0]["target_date"], "2026-05-09")
+
+    def test_added_date_different_from_fallback(self):
+        """added_date must take precedence over fallback_date when both differ."""
+        items = [self._make_vault_item("File expense report", added_date="2026-04-30")]
+        enriched = generate_vault_task_hashes(items, fallback_date="2026-05-10")
+        self.assertNotEqual(enriched[0]["target_date"], "2026-05-10")
+        self.assertEqual(enriched[0]["target_date"], "2026-04-30")
+
+    # ── source_id encodes correct date ────────────────────────────────────
+
+    def test_source_id_encodes_added_date_path(self):
+        """source_id must embed the added_date Daily Note path, not today."""
+        items = [self._make_vault_item("Review lease agreement", added_date="2026-05-03")]
+        enriched = generate_vault_task_hashes(items, fallback_date="2026-05-10")
+        self.assertIn("Calendar/Daily/2026/05/2026-05-03.md", enriched[0]["source_id"])
+        self.assertNotIn("2026-05-10", enriched[0]["source_id"])
+
+    def test_source_id_encodes_fallback_date_when_no_added_date(self):
+        """source_id must embed the fallback date path when added_date is absent."""
+        items = [self._make_vault_item("Return library books")]
+        enriched = generate_vault_task_hashes(items, fallback_date="2026-05-10")
+        self.assertIn("Calendar/Daily/2026/05/2026-05-10.md", enriched[0]["source_id"])
+
+    # ── hash stability ────────────────────────────────────────────────────
+
+    def test_hash_differs_by_date(self):
+        """Same task name on different dates must produce different TaskHashes."""
+        name = "Fold and store laundry"
+        item_a = self._make_vault_item(name, added_date="2026-05-01")
+        item_b = self._make_vault_item(name, added_date="2026-05-02")
+        enriched_a = generate_vault_task_hashes([item_a], fallback_date="2026-05-10")
+        enriched_b = generate_vault_task_hashes([item_b], fallback_date="2026-05-10")
+        self.assertNotEqual(enriched_a[0]["task_hash"], enriched_b[0]["task_hash"])
+
+    def test_hash_is_stable_for_same_date(self):
+        """Same task name on the same date always produces the same TaskHash."""
+        name = "Pay monthly rent"
+        item = self._make_vault_item(name, added_date="2026-05-08")
+        enriched_1 = generate_vault_task_hashes([item], fallback_date="2026-05-10")
+        enriched_2 = generate_vault_task_hashes([item], fallback_date="2026-05-10")
+        self.assertEqual(enriched_1[0]["task_hash"], enriched_2[0]["task_hash"])
+
+    # ── multi-date grouping (integration with insert_tasks_into_daily_note) ─
+
+    def test_tasks_on_different_dates_produce_different_target_dates(self):
+        """Tasks with different added_dates must have distinct target_dates."""
+        items = [
+            self._make_vault_item("Schedule eye exam", added_date="2026-05-01"),
+            self._make_vault_item("Buy coffee beans",   added_date="2026-05-03"),
+            self._make_vault_item("Call landlord",      added_date="2026-05-03"),
+        ]
+        enriched = generate_vault_task_hashes(items, fallback_date="2026-05-10")
+        dates = {t["target_date"] for t in enriched}
+        self.assertEqual(dates, {"2026-05-01", "2026-05-03"})
+
+    def test_tasks_grouped_by_target_date_write_to_correct_daily_note(self):
+        """
+        Integration: tasks are written to separate Daily Notes based on target_date.
+        Verifies that a task created on 2026-05-01 does NOT appear in 2026-05-10.md.
+        """
+        from collections import defaultdict
+
+        items = [
+            self._make_vault_item("Schedule eye exam", added_date="2026-05-01"),
+            self._make_vault_item("Buy coffee beans",  added_date="2026-05-10"),
+        ]
+        enriched = generate_vault_task_hashes(items, fallback_date="2026-05-10")
+
+        # Group by target_date (mirrors main() logic)
+        vault_by_date = defaultdict(list)
+        for t in enriched:
+            vault_by_date[t["target_date"]].append(t)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            vault_root = Path(tmpdir)
+            # Write each group to its Daily Note
+            written_notes = {}
+            for note_date, tasks_for_date in vault_by_date.items():
+                note_path = vault_root / "Calendar" / "Daily" / note_date[:4] / note_date[5:7] / f"{note_date}.md"
+                content = create_daily_note_content(note_date)
+                updated = insert_tasks_into_daily_note(content, tasks_for_date)
+                note_path.parent.mkdir(parents=True, exist_ok=True)
+                note_path.write_text(updated, encoding="utf-8")
+                written_notes[note_date] = updated
+
+        # 2026-05-01 note contains eye exam but NOT coffee beans
+        note_0501 = written_notes["2026-05-01"]
+        self.assertIn("Schedule eye exam", note_0501)
+        self.assertNotIn("Buy coffee beans", note_0501)
+
+        # 2026-05-10 note contains coffee beans but NOT eye exam
+        note_0510 = written_notes["2026-05-10"]
+        self.assertIn("Buy coffee beans", note_0510)
+        self.assertNotIn("Schedule eye exam", note_0510)
+
+    def test_fallback_used_when_all_tasks_lack_added_date(self):
+        """All tasks without added_date must go to the same fallback Daily Note."""
+        items = [
+            self._make_vault_item("Task Alpha"),
+            self._make_vault_item("Task Beta"),
+        ]
+        enriched = generate_vault_task_hashes(items, fallback_date="2026-05-10")
+        dates = {t["target_date"] for t in enriched}
+        self.assertEqual(dates, {"2026-05-10"})
+
+    def test_due_date_preserved_after_added_date_routing(self):
+        """due_date must be preserved in enriched output regardless of added_date."""
+        items = [self._make_vault_item("Submit tax return", added_date="2026-04-28", due_date="2026-05-31")]
+        enriched = generate_vault_task_hashes(items, fallback_date="2026-05-10")
+        self.assertEqual(enriched[0]["due_date"], "2026-05-31")
+        self.assertEqual(enriched[0]["target_date"], "2026-04-28")
 
 
 if __name__ == "__main__":
