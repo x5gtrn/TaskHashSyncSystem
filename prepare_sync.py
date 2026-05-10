@@ -760,13 +760,32 @@ def detect_existing_issue_updates(owner: str, repo: str, state: Dict[str, Any]) 
         return []
 
 
-    # Collect synced child tasks for each project
+    def find_ancestor_project(task_hash, visited=None):
+        """Walk parent_task_hash chain until a github_project is found.
+
+        Returns the project hash if an ancestor is a github_project,
+        or None if the chain terminates without finding one.
+        Cycle guard prevents infinite loops on malformed state data.
+        """
+        if visited is None:
+            visited = set()
+        if task_hash in visited:
+            return None  # cycle guard
+        visited.add(task_hash)
+        entry = state.get(task_hash, {})
+        parent_hash = entry.get('parent_task_hash')
+        if parent_hash is None:
+            return None
+        if parent_hash in github_projects:
+            return parent_hash
+        return find_ancestor_project(parent_hash, visited)
+
+    # Collect synced child tasks for each project (direct children AND grandchildren)
     for hash_val, entry in state.items():
         if entry.get('task_type') == 'github_task':
-            parent_hash = entry.get('parent_task_hash')
-            # Skip debug output
-            if parent_hash in github_projects:
-                github_projects[parent_hash]['synced_tasks'].append({
+            project_hash = find_ancestor_project(hash_val)
+            if project_hash is not None:
+                github_projects[project_hash]['synced_tasks'].append({
                     'hash': hash_val,
                     'name': entry.get('of_task_name', ''),
                     'status': entry.get('status')

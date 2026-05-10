@@ -1,35 +1,26 @@
 #!/usr/bin/env python3
 """
-Regression tests for prepare_sync.py — specifically the grandchild bug in
+Regression tests for prepare_sync.py — specifically the grandchild fix in
 detect_existing_issue_updates().
 
-KNOWN BUG (not yet fixed):
-  detect_existing_issue_updates() only collects DIRECT children of a GitHub Project.
-  Tasks whose parent_task_hash points to another task (not the Project itself) are
-  missed — misidentified as "new tasks" on every sync.
+FIX (applied):
+  detect_existing_issue_updates() now uses recursive ancestor traversal
+  (find_ancestor_project) instead of a direct parent lookup.
+
+  Previously, tasks whose parent_task_hash pointed to another task (not the
+  Project itself) were missed — misidentified as "new tasks" on every sync.
 
   Example:
     Project:      Job Search Q3 (60c6d084)       [task_type: github_project]
     Direct child: Follow up on Rayzel referral (4375b980)  [parent_task_hash: 60c6d084]
     Grandchild:   Review submitted job description (3d8c2904) [parent_task_hash: 4375b980]
 
-    The grandchild is NOT in synced_hashes because its parent_task_hash (4375b980)
-    is not in the github_projects dict -> it appears as a "new_task" every sync.
+    With the fix, find_ancestor_project(3d8c2904) walks up:
+      3d8c2904 -> parent 4375b980 -> parent 60c6d084 (github_project) -> returns 60c6d084
+    The grandchild is now correctly included in synced_tasks for project 60c6d084.
 
-Proposed fix (lines ~764-774 of prepare_sync.py):
-  Replace direct parent lookup with recursive ancestor traversal:
-
-    def find_project_hash(task_hash, state, github_projects):
-        entry = state.get(task_hash, {})
-        parent_hash = entry.get('parent_task_hash')
-        if parent_hash is None:
-            return None
-        if parent_hash in github_projects:
-            return parent_hash
-        return find_project_hash(parent_hash, state, github_projects)
-
-The tests in TestGrandchildDetection are currently SKIPPED until the fix is
-implemented. Remove the @unittest.skip decorator once prepare_sync.py is patched.
+Fix location: prepare_sync.py, function detect_existing_issue_updates(),
+  find_ancestor_project() helper + updated synced_tasks collection loop.
 
 Run:  python3 -m unittest tests.test_prepare_sync_regression  (from TaskHashSyncSystem/)
 """
@@ -54,6 +45,16 @@ GRANDCHILD_STATE = {
         "status": "open",
         "task_type": "github_project",
     },
+    # Direct child (completed) — appears as [x] in ISSUE_JOBS_BODY_SYNCED
+    "35efa56a": {
+        "source_id": "github:x5gtrn/LIFE#2:Reply to recruiter email",
+        "of_task_id": "t000",
+        "of_task_name": "Reply to recruiter email (35efa56a)",
+        "status": "completed",
+        "task_type": "github_task",
+        "parent_task_hash": "60c6d084",
+    },
+    # Direct child (open)
     "4375b980": {
         "source_id": "github:x5gtrn/LIFE#2:Follow up on Rayzel referral",
         "of_task_id": "t001",
@@ -62,13 +63,14 @@ GRANDCHILD_STATE = {
         "task_type": "github_task",
         "parent_task_hash": "60c6d084",
     },
+    # Grandchild (open) — parent is a github_task, NOT the github_project directly
     "3d8c2904": {
         "source_id": "github:x5gtrn/LIFE#2:Review submitted job description",
         "of_task_id": "t002",
         "of_task_name": "Review submitted job description (3d8c2904)",
         "status": "open",
         "task_type": "github_task",
-        "parent_task_hash": "4375b980",  # grandchild: parent is NOT the Project
+        "parent_task_hash": "4375b980",
     },
 }
 
@@ -80,10 +82,6 @@ ISSUE_JOBS_BODY_SYNCED = (
 )
 
 
-@unittest.skip(
-    "Known bug: detect_existing_issue_updates() does not traverse grandchild tasks. "
-    "Remove this skip once the recursive parent-chain fix is applied to prepare_sync.py."
-)
 class TestGrandchildDetection(unittest.TestCase):
     """
     detect_existing_issue_updates() must NOT classify already-synced grandchild
@@ -103,19 +101,14 @@ class TestGrandchildDetection(unittest.TestCase):
         """
         import prepare_sync as ps
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            state_file = Path(tmpdir) / "sync_state.json"
-            state_file.write_text(json.dumps(GRANDCHILD_STATE), encoding='utf-8')
-
-            with patch.object(ps, 'STATE_FILE', state_file), \
-                 patch('subprocess.run') as mock_run:
-
-                mock_run.return_value = MagicMock(
-                    stdout=json.dumps({"body": ISSUE_JOBS_BODY_SYNCED}),
-                    returncode=0
-                )
-
-                updates = ps.detect_existing_issue_updates()
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(
+                stdout=json.dumps({"body": ISSUE_JOBS_BODY_SYNCED}),
+                returncode=0
+            )
+            updates = ps.detect_existing_issue_updates(
+                owner='x5gtrn', repo='LIFE', state=GRANDCHILD_STATE
+            )
 
         issue_2_updates = [u for u in updates if u.get("issue_num") == 2]
         if issue_2_updates:
@@ -134,19 +127,14 @@ class TestGrandchildDetection(unittest.TestCase):
         """
         import prepare_sync as ps
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            state_file = Path(tmpdir) / "sync_state.json"
-            state_file.write_text(json.dumps(GRANDCHILD_STATE), encoding='utf-8')
-
-            with patch.object(ps, 'STATE_FILE', state_file), \
-                 patch('subprocess.run') as mock_run:
-
-                mock_run.return_value = MagicMock(
-                    stdout=json.dumps({"body": ISSUE_JOBS_BODY_SYNCED}),
-                    returncode=0
-                )
-
-                updates = ps.detect_existing_issue_updates()
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(
+                stdout=json.dumps({"body": ISSUE_JOBS_BODY_SYNCED}),
+                returncode=0
+            )
+            updates = ps.detect_existing_issue_updates(
+                owner='x5gtrn', repo='LIFE', state=GRANDCHILD_STATE
+            )
 
         # After fix: no new_tasks at all for issue #2 (everything already synced)
         for update in updates:
