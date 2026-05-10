@@ -161,7 +161,7 @@ Vault Daily Note Task:
 │  └──────────────┘  └──────────────┘  └──────────────┘     │
 │         ↓                 ↓                 ↓             │
 │  ┌──────────────────────────────────────────────────┐     │
-│  │        prepare_sync.py (Data Preparation)        │     │
+│  │   prepare_sync.py (Data Preparation)             │     │
 │  │  • Scan GitHub Issues + Vault Daily Notes        │     │
 │  │  • Generate TaskHashes                           │     │
 │  │  • Detect parent-child relationships             │     │
@@ -616,8 +616,8 @@ INBOX:
    
    - [ ] Approve budget request
    - [ ] Schedule team lunch
-   	- [ ] Check restaurant availability
-   	- [ ] Send meeting invite
+       - [ ] Check restaurant availability
+       - [ ] Send meeting invite
    ```
 
 2. **Run prepare_sync.py**
