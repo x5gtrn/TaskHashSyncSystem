@@ -813,6 +813,10 @@ def detect_existing_issue_updates(owner: str, repo: str, state: Dict[str, Any]) 
             # Extract hashes from synced tasks
             synced_hashes = {}  # hash -> {name, status}
             for task in project_info['synced_tasks']:
+                # Skip dropped tasks — they were intentionally removed; don't treat
+                # their absence in the current Issue body as a new "deleted" event.
+                if task.get('status') == 'dropped':
+                    continue
                 hash_match = re.search(r'\(([a-f0-9]{8})\)', task['name'])
                 if hash_match:
                     task_hash = hash_match.group(1)

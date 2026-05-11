@@ -469,21 +469,15 @@ and route each one to the correct destination.
 
 **Process** (automated via `scan_omnifocus_inbox.py`):
 1. Claude calls `mcp__omnifocus-local-server__dump_database`
-2. Claude normalizes all incomplete tasks into `all_tasks_raw.json`:
-   ```json
-   {"tasks": [{"id": "OFTaskID", "name": "Task Name", "due_date": null, "added_date": "YYYY-MM-DD", "parent_name": "Later"}]}
-   ```
-   `added_date` = ISO date (YYYY-MM-DD) when the task was created in OmniFocus.
-   Determines which Daily Note the task is written to (falls back to today if absent or null).
-3. Claude runs `python3 scan_omnifocus_inbox.py --tasks all_tasks_raw.json`
+2. Claude saves raw text output to `omnifocus_dump.txt` (single Write — no manual JSON construction)
+3. Claude runs `python3 scan_omnifocus_inbox.py --dump-file omnifocus_dump.txt`
+    - `parse_omnifocus_dump.py` auto-converts text → `all_tasks_raw.json`
     - Filters tasks without TaskHash
     - Generates TaskHash using `task_hash.py`
     - Routes each task based on parent Project (see routing rules below)
-    - Updates sync_state.json
-    - Outputs `inbox_rename_requests.json`
-4. Claude reads `inbox_rename_requests.json` and calls `edit_item` for each task
-    - **Appends TaskHash to OmniFocus task name** (mandatory for tracking)
-5. Task is now tracked with `(hash)` in both OmniFocus AND Vault/GitHub
+    - Updates sync_state.json, writes Vault Daily Notes
+    - **Automatically renames hashless OmniFocus tasks via JXA** (no manual `edit_item` calls)
+4. Task is now tracked with `(hash)` in both OmniFocus AND Vault/GitHub
 
 **Routing Rules**:
 ```
@@ -558,7 +552,7 @@ Processing:
 2. **Never create orphaned TaskHash-less tasks** — All OmniFocus tasks must receive a TaskHash
 3. **GitHub Issue takes priority** — If task is child of GitHub Issue Project, route to Issue before Vault
 4. **Generate hash before commit** — Create TaskHash immediately when classifying
-5. **Update OmniFocus task name** — Append hash via `edit_item` (essential for tracking)
+5. **Update OmniFocus task name** — Appended automatically via JXA inside `scan_omnifocus_inbox.py`; manual `edit_item` only needed as fallback if JXA fails
 6. **Idempotency** — Tasks already carrying a hash are skipped entirely
 
 ### 12. Manual Sync Trigger
@@ -617,18 +611,16 @@ When the user says **"sync tasks"** or equivalent command:
 
 #### STEP 3 — All-Tasks Scan (OmniFocus All Tasks → Vault Daily Note / GitHub)
 - Call MCP: `mcp__omnifocus-local-server__dump_database`
-- Extract ALL incomplete tasks (Inbox + every Project) and normalize into **`all_tasks_raw.json`**:
-  ```json
-  {"tasks": [{"id": "OFTaskID", "name": "Task Name", "due_date": null, "added_date": "YYYY-MM-DD", "parent_name": "ProjectName"}]}
-  ```
-    - `parent_name` = the containing Project's name (omit or `null` for true Inbox tasks)
-    - `added_date` = OmniFocus task creation date (ISO YYYY-MM-DD). The script writes the task
-      to the Daily Note for this date. Falls back to today if absent or null.
-- Run `python3 scan_omnifocus_inbox.py --tasks all_tasks_raw.json`
+- Save the raw text output to **`omnifocus_dump.txt`** (single Write call — no manual JSON)
+- Run `python3 scan_omnifocus_inbox.py --dump-file omnifocus_dump.txt`
+    - Internally calls `parse_omnifocus_dump.py` to build `all_tasks_raw.json` automatically
+    - Filters tasks without TaskHash
+    - Routes each task (parent Project has no TaskHash → Vault; has TaskHash → GitHub Issue)
+    - Updates sync_state.json, writes Vault Daily Notes, adds tasks to GitHub Issues
+    - **Automatically renames OmniFocus tasks via JXA** (no manual `edit_item` calls needed)
 - Routing rules applied by the script:
-    - Task has **no TaskHash** AND parent Project **has no TaskHash** (or no parent) → add to the Vault Daily Note for `added_date` (fallback: today)
-    - Task has **no TaskHash** AND parent Project **has a TaskHash** (= GitHub Issue Project) → add to GitHub Issue body
-- For each new task, call MCP: `mcp__omnifocus-local-server__edit_item` to append TaskHash to OmniFocus task name
+    - Task has **no TaskHash** AND parent Project **has no TaskHash** (or no parent) → Vault Daily Note for `added_date` (fallback: today)
+    - Task has **no TaskHash** AND parent Project **has a TaskHash** (= GitHub Issue Project) → GitHub Issue body
 
 **Example**:
 ```
@@ -864,8 +856,9 @@ x/Scripts/TaskHashSyncSystem/
 ├── tasks_to_sync.json           # Prepared tasks waiting for sync (output of prepare_sync.py)
 ├── precheck_requests.json       # Pre-existence checks Claude MUST run before batch_add_items
 ├── completed_tasks_raw.json     # Input to reverse_sync.py (Claude writes)
-├── all_tasks_raw.json           # Input to scan_omnifocus_inbox.py (Claude writes from dump_database)
-└── inbox_rename_requests.json   # Output of scan_omnifocus_inbox.py (Claude reads + executes)
+├── omnifocus_dump.txt           # Raw dump_database text (Claude saves, auto-parsed by scan_omnifocus_inbox.py)
+├── all_tasks_raw.json           # Auto-generated by scan_omnifocus_inbox.py --dump-file (do not edit manually)
+└── inbox_rename_requests.json   # Output of scan_omnifocus_inbox.py (audit log; renames applied automatically)
 ```
 
 **Documentation**:

@@ -32,9 +32,14 @@ def extract_hash(task_name):
     return match.group(1) if match else None
 
 
-def parse_omnifocus_dump(dump_text):
+def parse_omnifocus_dump(dump_text, sync_state=None):
     """
     Parse OmniFocus dump text output into task list.
+
+    sync_state: optional dict loaded from sync_state.json.
+      When provided, added_date is backfilled from the entry's synced_at field
+      for tasks that are already tracked (has TaskHash). For new/hashless tasks,
+      added_date remains null (scan_omnifocus_inbox.py falls back to today).
 
     Returns:
     {
@@ -43,6 +48,7 @@ def parse_omnifocus_dump(dump_text):
           "id": sequential_id,
           "name": task_name,
           "due_date": "YYYY-MM-DD" or null,
+          "added_date": "YYYY-MM-DD" or null,
           "parent_name": parent_task_or_project_name or null
         },
         ...
@@ -132,12 +138,21 @@ def parse_omnifocus_dump(dump_text):
                         parent_name = stack_task
                         break
 
+            # Backfill added_date from sync_state if task has a TaskHash
+            added_date = None
+            task_hash = extract_hash(clean_name)
+            if task_hash and sync_state and task_hash in sync_state:
+                synced_at = sync_state[task_hash].get("synced_at", "")
+                if synced_at:
+                    added_date = synced_at[:10]  # "YYYY-MM-DD" from ISO timestamp
+
             # Add task
             task_id += 1
             tasks.append({
                 "id": str(task_id),
                 "name": clean_name,
                 "due_date": due_date,
+                "added_date": added_date,
                 "parent_name": parent_name
             })
 

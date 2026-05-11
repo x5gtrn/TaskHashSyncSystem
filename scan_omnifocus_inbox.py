@@ -62,6 +62,7 @@ SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from task_hash import compute_hash, make_vault_source_id, make_github_source_id, has_hash, remove_hash, extract_hash
+from parse_omnifocus_dump import parse_omnifocus_dump
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -782,8 +783,17 @@ def main() -> int:
         "--tasks",
         type=str,
         help=(
-            "Path to all_tasks_raw.json — all OmniFocus tasks normalized by Claude from dump_database(). "
+            "Path to all_tasks_raw.json — all OmniFocus tasks normalized from dump_database(). "
             "Format: {\"tasks\": [{\"id\": \"...\", \"name\": \"...\", \"due_date\": null, \"parent_name\": \"ProjectName\"}]}"
+        ),
+    )
+    tasks_group.add_argument(
+        "--dump-file",
+        type=str,
+        help=(
+            "Path to raw dump_database text output (omnifocus_dump.txt). "
+            "Automatically parsed into all_tasks_raw.json via parse_omnifocus_dump.py. "
+            "Use this instead of --tasks to skip manual JSON creation."
         ),
     )
     tasks_group.add_argument(
@@ -819,19 +829,33 @@ def main() -> int:
         print(f"Fallback date: {fallback_date}")
         print(f"Dry run: {args.dry_run}")
 
-    # Resolve input file path (--tasks takes precedence; --inbox-tasks is deprecated alias)
-    tasks_path_str = args.tasks or args.inbox_tasks
-    tasks_path = Path(tasks_path_str)
-    if args.inbox_tasks and not args.tasks:
-        print("Warning: --inbox-tasks is deprecated. Use --tasks with all_tasks_raw.json instead.")
-
-    try:
-        all_tasks = load_tasks(tasks_path)
-    except FileNotFoundError as e:
-        print(f"Error: {e}")
-        return 1
-
-    state = load_state()
+    # Resolve input: --dump-file → auto-parse; --tasks or --inbox-tasks → load JSON
+    if args.dump_file:
+        dump_path = Path(args.dump_file)
+        if not dump_path.exists():
+            print(f"Error: dump file not found: {dump_path}")
+            return 1
+        with open(dump_path, "r", encoding="utf-8") as f:
+            dump_text = f.read()
+        # Load state first so parse can backfill added_date for known tasks
+        state = load_state()
+        parsed = parse_omnifocus_dump(dump_text, sync_state=state)
+        # Write to all_tasks_raw.json for auditability
+        with open(ALL_TASKS_FILE, "w", encoding="utf-8") as f:
+            json.dump(parsed, f, ensure_ascii=False, indent=2)
+        all_tasks = parsed.get("tasks", [])
+        print(f"✓ Parsed {len(all_tasks)} tasks from dump file → all_tasks_raw.json")
+    else:
+        tasks_path_str = args.tasks or args.inbox_tasks
+        tasks_path = Path(tasks_path_str)
+        if args.inbox_tasks and not args.tasks:
+            print("Warning: --inbox-tasks is deprecated. Use --tasks with all_tasks_raw.json instead.")
+        try:
+            all_tasks = load_tasks(tasks_path)
+        except FileNotFoundError as e:
+            print(f"Error: {e}")
+            return 1
+        state = load_state()
 
     print(f"Loaded {len(all_tasks)} tasks from OmniFocus (all projects + inbox)")
 
@@ -977,7 +1001,7 @@ def main() -> int:
     save_state(state)
     print(f"✓ Updated sync_state.json (+{len(new_state_entries)} entries)")
 
-    # Save rename requests for Claude (all tasks, both GitHub and Vault)
+    # Save rename requests (all tasks, both GitHub and Vault)
     all_enriched = github_enriched + vault_enriched
     save_rename_requests(github_enriched, vault_enriched)
     print(f"✓ Saved inbox_rename_requests.json ({len(all_enriched)} rename request(s))")
@@ -987,13 +1011,48 @@ def main() -> int:
         save_github_additions(github_enriched)
         print(f"✓ Saved github_issue_additions.json ({len(github_enriched)} addition(s))")
 
+    # ── Auto-rename OmniFocus tasks via JXA ──────────────────────────────────
+    # Writes a temp JS file to avoid AppleScript encoding issues with Japanese/special chars
+    if all_enriched and not args.dry_run:
+        renamed_ok = []
+        renamed_fail = []
+        for t in all_enriched:
+            original = t["original_name"]
+            new_name = t["new_name"]
+            # Build JXA script file to avoid inline special-character escaping issues
+            jxa_script = (
+                "const of3 = Application('OmniFocus 3');\n"
+                "const tasks = of3.flattenedTasks();\n"
+                f"const target = {json.dumps(original)};\n"
+                f"const renamed = {json.dumps(new_name)};\n"
+                "let found = false;\n"
+                "for (const t of tasks) {\n"
+                "  if (t.name() === target) { t.name = renamed; found = true; break; }\n"
+                "}\n"
+                "found ? 'OK' : 'NOT_FOUND';\n"
+            )
+            jxa_path = Path("/tmp/_of_rename.js")
+            jxa_path.write_text(jxa_script, encoding="utf-8")
+            result = subprocess.run(
+                ["osascript", "-l", "JavaScript", str(jxa_path)],
+                capture_output=True, text=True, timeout=10
+            )
+            outcome = result.stdout.strip()
+            if outcome == "OK":
+                renamed_ok.append(original)
+            else:
+                renamed_fail.append(original)
+
+        if renamed_ok:
+            print(f"✓ OmniFocus tasks renamed ({len(renamed_ok)}): {', '.join(renamed_ok[:3])}{'...' if len(renamed_ok) > 3 else ''}")
+        if renamed_fail:
+            print(f"⚠️  Could not rename in OmniFocus ({len(renamed_fail)}): {', '.join(renamed_fail[:3])}")
+            print("   → Rename manually or re-run after OmniFocus sync.")
+
     print()
     print("Next steps:")
     if github_enriched:
         print("  1. Claude reads github_issue_additions.json and adds tasks to GitHub Issues")
-        print("  2. Claude reads inbox_rename_requests.json and calls edit_item for OmniFocus tasks")
-    else:
-        print("  1. Claude reads inbox_rename_requests.json and calls edit_item for OmniFocus tasks")
 
     return 0
 

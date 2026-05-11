@@ -86,7 +86,9 @@ def has_hash(task_name: str) -> bool:
     """
     Check if a task name already has a hash appended.
 
-    Pattern: " (XXXXXXXX)" where X is a hex digit
+    Pattern: "(XXXXXXXX)" optionally preceded by a space, at end of string.
+    Accepts both "Task (abc12345)" and "Task(abc12345)" to tolerate OmniFocus
+    task names where the user omitted the leading space.
 
     Args:
         task_name: Task name to check
@@ -94,7 +96,7 @@ def has_hash(task_name: str) -> bool:
     Returns:
         True if hash pattern is found, False otherwise
     """
-    pattern = r' \([0-9a-f]{8}\)$'
+    pattern = r' ?\([0-9a-f]{8}\)$'
     return bool(re.search(pattern, task_name))
 
 
@@ -102,13 +104,15 @@ def extract_hash(task_name: str) -> str | None:
     """
     Extract hash from a task name.
 
+    Accepts both "Task (abc12345)" and "Task(abc12345)".
+
     Args:
         task_name: Task name potentially containing hash
 
     Returns:
         Hash string (without parentheses) if found, None otherwise
     """
-    pattern = r' \(([0-9a-f]{8})\)$'
+    pattern = r' ?\(([0-9a-f]{8})\)$'
     match = re.search(pattern, task_name)
     return match.group(1) if match else None
 
@@ -117,13 +121,15 @@ def remove_hash(task_name: str) -> str:
     """
     Remove hash suffix from a task name.
 
+    Accepts both "Task (abc12345)" and "Task(abc12345)".
+
     Args:
         task_name: Task name with potential hash
 
     Returns:
         Task name without hash
     """
-    pattern = r' \([0-9a-f]{8}\)$'
+    pattern = r' ?\([0-9a-f]{8}\)$'
     return re.sub(pattern, '', task_name)
 
 
