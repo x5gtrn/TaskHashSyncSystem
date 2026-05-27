@@ -109,34 +109,44 @@ def parse_omnifocus_dump(dump_text, sync_state=None):
                 continue
             seen_tasks.add(task_key)
 
-            # Skip container tasks (same name as parent project)
-            # Container format: project name appears as first child with same name
-            if current_project and extract_hash(clean_name) == extract_hash(current_project):
-                # This is a container task, skip it
-                continue
-
             # Determine parent based on indent level and context
+            # IMPORTANT: Do this BEFORE checking for container, so hierarchy stack is updated
             parent_name = None
 
-            # First, check if this is a direct child of a project
-            # Project's first direct child (indent_level 0 under P:) has the project as parent
-            if current_project and indent_level == 0:
-                # First task under project - might be container
-                if current_project not in project_first_child:
-                    project_first_child[current_project] = clean_name
-                    # This is the first child (container), don't set parent to skip it later
-                else:
-                    # Subsequent children have the project as parent
+            # Parent determination logic:
+            # 1. If this is the first direct child of a project (no siblings), parent is the project
+            # 2. Otherwise, parent is the most recent task at indent_level - 1
+            if current_project and indent_level > 0:
+                # Under a project: check if this is a direct child (next indent level after project marker)
+                # Find the most recent entry in stack at indent_level - 1
+                found_parent = False
+                for stack_indent, stack_task in reversed(current_task_stack):
+                    if stack_indent == indent_level - 1:
+                        parent_name = stack_task
+                        found_parent = True
+                        break
+                # If no parent found in stack but we're directly under the project, parent is the project
+                if not found_parent and current_project not in project_first_child:
                     parent_name = current_project
-            elif indent_level == 0:
-                # Top-level task in INBOX
-                parent_name = None
-            else:
-                # Child task - parent is the last task at indent_level - 1
-                for stack_indent, stack_task in current_task_stack:
+                    project_first_child[current_project] = clean_name
+            elif indent_level > 0:
+                # Not in a project, but has indent: find parent from task stack
+                for stack_indent, stack_task in reversed(current_task_stack):
                     if stack_indent == indent_level - 1:
                         parent_name = stack_task
                         break
+
+            # CRITICAL: Update task stack BEFORE checking for container skip
+            # This ensures child tasks can find their parent even if container is skipped
+            current_task_stack = [(i, n) for i, n in current_task_stack if i < indent_level]
+            current_task_stack.append((indent_level, clean_name))
+
+            # Skip container tasks (same name as parent project)
+            # Container format: project name appears as first child with same name
+            # NOTE: Stack is already updated above, so children will still find parent
+            if current_project and extract_hash(clean_name) == extract_hash(current_project):
+                # This is a container task, skip adding it to the task list
+                continue
 
             # Backfill added_date from sync_state if task has a TaskHash
             added_date = None
@@ -155,10 +165,6 @@ def parse_omnifocus_dump(dump_text, sync_state=None):
                 "added_date": added_date,
                 "parent_name": parent_name
             })
-
-            # Update task stack for hierarchy tracking
-            current_task_stack = [(i, n) for i, n in current_task_stack if i < indent_level]
-            current_task_stack.append((indent_level, clean_name))
         elif line.strip() == 'INBOX:':
             # Inbox marker
             current_project = None
