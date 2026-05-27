@@ -10,13 +10,14 @@ Video: [The Task Management with TaskHashSyncSystem: Seamless OmniFocus Integrat
 1. [System Overview](#system-overview)
 2. [Core Concept: TaskHash](#core-concept-taskhash)
 3. [Architecture](#architecture)
-4. [Synchronization Domains](#synchronization-domains)
-5. [Implementation Details](#implementation-details)
-6. [Workflows](#workflows)
-7. [Data Structures](#data-structures)
-8. [Scripts Reference](#scripts-reference)
-9. [Error Handling](#error-handling)
-10. [Examples](#examples)
+4. [Multi-Repository Support](#multi-repository-support)
+5. [Synchronization Domains](#synchronization-domains)
+6. [Implementation Details](#implementation-details)
+7. [Workflows](#workflows)
+8. [Data Structures](#data-structures)
+9. [Scripts Reference](#scripts-reference)
+10. [Error Handling](#error-handling)
+11. [Examples](#examples)
 
 ---
 
@@ -216,6 +217,191 @@ Vault Daily Note Task:
 | `completed_tasks_raw.json` | Input to reverse_sync.py (Claude writes from filter_tasks MCP result) |
 | `inbox_rename_requests.json` | OmniFocus rename log written by scan_omnifocus_inbox.py; renames are applied automatically via JXA (no manual edit_item calls) |
 | `github_issue_additions.json` | Tasks to add to GitHub Issue bodies (output of scan_omnifocus_inbox.py) |
+| `repositories.json` | Configuration file listing GitHub repositories to sync (v2.6+) |
+
+---
+
+## Multi-Repository Support
+
+### Overview (v2.6+)
+
+The TaskHashSyncSystem now supports **synchronizing tasks from multiple GitHub repositories** into a single OmniFocus setup. Each repository's Issues are converted to OmniFocus Projects independently, while Vault tasks are synced to OmniFocus Inbox regardless of repository count.
+
+### Configuration
+
+#### `repositories.json`
+
+A configuration file (`repositories.json`) defines which GitHub repositories to sync:
+
+```json
+{
+  "repositories": [
+    "x5gtrn/LIFE",
+    "your-org/project-a",
+    "your-org/project-b"
+  ],
+  "description": "List of GitHub repositories to sync with OmniFocus",
+  "notes": [
+    "Each repository's Issues will be converted to OmniFocus Projects",
+    "TaskHashes are unique per repository (owner/repo#issue_num)",
+    "Vault tasks sync to OmniFocus Inbox regardless of repository"
+  ]
+}
+```
+
+### How It Works
+
+1. **Configuration Loading**: `prepare_sync.py` reads `repositories.json` on startup
+2. **Loop Processing**: For each repository in the list:
+   - Scans all open Issues
+   - Generates TaskHashes for Issue titles and body tasks
+   - Detects changes in existing Issues
+   - Outputs tasks to sync
+3. **Unified Output**: All tasks from all repositories are consolidated into `tasks_to_sync.json`
+4. **Error Handling**: If a repository doesn't exist or access is denied, it's automatically skipped without stopping the sync
+
+### TaskHash Uniqueness Across Repositories
+
+TaskHashes are generated using the `source_id` format which includes the repository:
+
+```
+github:owner/repo#issue_num:task_name
+```
+
+This ensures **TaskHash uniqueness across repositories**:
+
+| Repo | Issue | Task | TaskHash |
+|------|-------|------|----------|
+| `x5gtrn/LIFE` | #1 | Design API | `a7f3c942` |
+| `x5gtrn/project-a` | #1 | Design API | `c2e5b8d1` |
+
+Same task name, different repositories = **different TaskHashes** ✅
+
+### Usage Examples
+
+#### Add a Repository
+
+Edit `repositories.json` and append the repository:
+
+```json
+{
+  "repositories": [
+    "x5gtrn/LIFE",
+    "your-org/new-repo"  ← Add this line
+  ]
+}
+```
+
+Run sync as usual:
+```bash
+python3 prepare_sync.py
+# All repositories processed automatically
+```
+
+#### Remove a Repository
+
+Delete the line from `repositories.json`:
+
+```json
+{
+  "repositories": [
+    "x5gtrn/LIFE"
+    # "your-org/old-repo" was removed
+  ]
+}
+```
+
+#### Sync a Specific Repository (CLI Override)
+
+Use `--repo` flag to override configuration:
+
+```bash
+python3 prepare_sync.py --repo your-org/specific-repo
+```
+
+This processes **only** the specified repository, ignoring `repositories.json`.
+
+### Sync Flow with Multiple Repositories
+
+```
+┌──────────────────────────────────────────────┐
+│     repositories.json (5 repositories)       │
+│  • x5gtrn/LIFE                               │
+│  • org/project-a                             │
+│  • org/project-b                             │
+│  • team/shared-repo                          │
+│  • community/open-source                     │
+└──────────────────────────────────────────────┘
+         ↓
+┌──────────────────────────────────────────────┐
+│     prepare_sync.py (Loop Processing)        │
+│                                              │
+│  REPO 1: x5gtrn/LIFE                         │
+│    [STEP 0] Process TaskHashless Issues      │
+│    [STEP 1] Scan Issues & Comments           │
+│                                              │
+│  REPO 2: org/project-a                       │
+│    [STEP 0] Process TaskHashless Issues      │
+│    [STEP 1] Scan Issues & Comments           │
+│                                              │
+│  ... (repeat for all repositories)           │
+│                                              │
+│  [STEP 2] Scan Vault Daily Notes (once)      │
+│  [STEP 3] Write TaskHashes back to Vault     │
+└──────────────────────────────────────────────┘
+         ↓
+┌──────────────────────────────────────────────┐
+│     tasks_to_sync.json (Unified Queue)       │
+│  • Tasks from LIFE (org/project-a issues)    │
+│  • Tasks from project-a (org/project-a)      │
+│  • Tasks from project-b (org/project-b)      │
+│  • Vault Daily Note tasks                    │
+└──────────────────────────────────────────────┘
+         ↓
+┌──────────────────────────────────────────────┐
+│     Claude: Forward/Reverse/All-Tasks Sync   │
+│   (3-step process — unchanged)               │
+└──────────────────────────────────────────────┘
+         ↓
+┌──────────────────────────────────────────────┐
+│     OmniFocus (Unified Task Store)           │
+│  • Project: x5gtrn/LIFE Issues               │
+│  • Project: org/project-a Issues             │
+│  • Project: org/project-b Issues             │
+│  • Inbox: Vault Daily Note Tasks             │
+└──────────────────────────────────────────────┘
+```
+
+### Key Properties
+
+| Property                | Behavior                                      |
+| ----------------------- | --------------------------------------------- |
+| **Repository Addition** | Edit `repositories.json`, run sync            |
+| **Repository Removal**  | Edit `repositories.json`, run sync            |
+| **Non-existent Repo**   | Automatically skipped; no error               |
+| **Access Denied**       | Automatically skipped; no error               |
+| **Vault Sync**          | Runs once after all repositories processed    |
+| **TaskHash Collision**  | Impossible (includes `owner/repo#issue_num`)  |
+| **State File**          | Single `sync_state.json` for all repositories |
+
+### Error Handling
+
+If a repository doesn't exist or access is denied:
+
+```
+[STEP 1: Scanning GitHub Issues]
+Fetching issues from unknown-org/repo...
+⚠️  Skipping unknown-org/repo - repository not found or access denied
+```
+
+The script **continues to the next repository** without interruption. ✅
+
+### Limitations & Considerations
+
+1. **Vault Sync**: Vault tasks are always synced to OmniFocus Inbox, regardless of which repositories are configured
+2. **Single sync_state.json**: All repositories share the same state database (not per-repository)
+3. **GitHub Authentication**: `gh` CLI must have access to all configured repositories
+4. **OmniFocus Capacity**: No hard limit on number of repositories or Projects
 
 ---
 

@@ -1,0 +1,24 @@
+{
+  "repositories": [
+    "x5gtrn/LIFE",
+    "org/project-a",
+    "org/project-b",
+    "team/shared-repo",
+    "community/open-source"
+  ],
+  "description": "List of GitHub repositories to sync with OmniFocus. Add more repositories in owner/repo format.",
+  "notes": [
+    "Each repository's Issues will be converted to OmniFocus Projects",
+    "TaskHashes are unique per repository (owner/repo#issue_num)",
+    "Vault tasks sync to OmniFocus Inbox regardless of repository",
+    "To add a repository: add 'owner/repo' format to the repositories array above",
+    "To remove a repository: delete the line from the array",
+    "To use a single repository via CLI: python3 prepare_sync.py --repo owner/repo"
+  ],
+  "examples_commented_out": [
+    "example-org/documentation",
+    "my-team/frontend",
+    "my-team/backend",
+    "community/open-source-project"
+  ]
+}

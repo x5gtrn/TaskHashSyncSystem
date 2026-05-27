@@ -58,8 +58,13 @@ def is_synced(hash_value: str, state: Dict[str, Any]) -> bool:
     return hash_value in state
 
 
-def fetch_github_issues(owner: str, repo: str) -> List[Dict[str, Any]]:
-    """Fetch open GitHub issues with comments using gh CLI."""
+def fetch_github_issues(owner: str, repo: str, verbose: bool = False) -> Optional[List[Dict[str, Any]]]:
+    """Fetch open GitHub issues with comments using gh CLI.
+
+    Returns None if repository doesn't exist or access is denied.
+    Returns empty list if repository exists but has no issues.
+    Raises CalledProcessError for transient network errors.
+    """
     try:
         cmd = [
             'gh', 'issue', 'list',
@@ -87,8 +92,15 @@ def fetch_github_issues(owner: str, repo: str) -> List[Dict[str, Any]]:
 
         return issues
     except subprocess.CalledProcessError as e:
-        print(f"Error fetching GitHub issues: {e.stderr}", file=sys.stderr)
-        sys.exit(1)
+        # Check if error is due to repository not found or access denied
+        stderr = e.stderr.lower()
+        if 'could not resolve to a repository' in stderr or 'not found' in stderr or 'access denied' in stderr:
+            if verbose:
+                print(f"⚠️  Repository {owner}/{repo} not found or access denied", file=sys.stderr)
+            return None  # Repository doesn't exist
+        else:
+            # Re-raise for transient network errors
+            raise
 
 
 def parse_subtasks(body: Optional[str]) -> List[str]:
@@ -268,11 +280,19 @@ def process_missing_taskhash_issues(owner: str, repo: str, state: Dict[str, Any]
 
 
 def prepare_github_tasks(owner: str, repo: str, state: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Prepare GitHub tasks for sync."""
+    """Prepare GitHub tasks for sync.
+
+    Returns empty list if repository doesn't exist.
+    """
     tasks_to_add = []
 
     print(f"Fetching issues from {owner}/{repo}...")
     issues = fetch_github_issues(owner, repo)
+
+    if issues is None:
+        print(f"⚠️  Skipping {owner}/{repo} - repository not found or access denied")
+        return []
+
     print(f"Found {len(issues)} open issues\n")
 
     for issue in issues:
@@ -1086,6 +1106,28 @@ def prepare_vault_tasks(
     return tasks_to_add, due_date_updates
 
 
+def load_repositories() -> List[str]:
+    """Load repository list from repositories.json configuration file."""
+    repo_config_file = SCRIPT_DIR / "repositories.json"
+
+    if not repo_config_file.exists():
+        # Fallback to environment or default
+        print("⚠️  repositories.json not found. Using default: x5gtrn/LIFE", file=sys.stderr)
+        return ["x5gtrn/LIFE"]
+
+    try:
+        with open(repo_config_file, 'r') as f:
+            config = json.load(f)
+        repos = config.get("repositories", [])
+        if not repos:
+            print("⚠️  No repositories configured in repositories.json. Using default: x5gtrn/LIFE", file=sys.stderr)
+            return ["x5gtrn/LIFE"]
+        return repos
+    except json.JSONDecodeError as e:
+        print(f"⚠️  Error parsing repositories.json: {e}. Using default: x5gtrn/LIFE", file=sys.stderr)
+        return ["x5gtrn/LIFE"]
+
+
 def main():
     import argparse
 
@@ -1095,8 +1137,8 @@ def main():
     parser.add_argument(
         '--repo',
         required=False,
-        default='x5gtrn/LIFE',
-        help='GitHub repository (owner/repo format)'
+        default=None,
+        help='GitHub repository (owner/repo format) - if not provided, loads from repositories.json'
     )
     parser.add_argument(
         '--vault-root',
@@ -1107,39 +1149,66 @@ def main():
 
     args = parser.parse_args()
 
+    # Load repositories from configuration or use CLI override
+    if args.repo:
+        repositories = [args.repo]
+    else:
+        repositories = load_repositories()
+
     state = load_state()
     all_tasks = []
-    existing_issue_updates = []
+    all_existing_issue_updates = []
 
     print("=" * 70)
-    print("TASK SYNC PREPARATION - Full Workflow")
+    print("TASK SYNC PREPARATION - Full Workflow (Multi-Repository)")
     print("=" * 70)
+    print(f"Processing {len(repositories)} repository(ies): {', '.join(repositories)}\n")
 
-    # STEP 0: Process missing GitHub Issue TaskHashes (SECTION 3.5)
-    # This MUST run before prepare_github_tasks to ensure all Issues have hashes
-    if '/' in args.repo:
-        owner, repo = args.repo.split('/', 1)
-        print("\n[STEP 0: Automatic GitHub Issue Processing (Section 3.5)]")
-        processed = process_missing_taskhash_issues(owner, repo, state)
-        # Reload state after processing
-        state = load_state()
+    # Process each repository
+    for repo_full in repositories:
+        if '/' not in repo_full:
+            print(f"⚠️  Skipping invalid repository format: {repo_full} (expected: owner/repo)")
+            continue
 
-    # STEP 0.5: Detect changes in existing synced GitHub Issues
-    if '/' in args.repo:
-        owner, repo = args.repo.split('/', 1)
-        print("\n[STEP 0.5: Detecting Changes in Existing GitHub Issues]")
-        existing_issue_updates = detect_existing_issue_updates(owner, repo, state)
-        # Reload state after processing
-        state = load_state()
+        owner, repo = repo_full.split('/', 1)
 
-    # STEP 1: Prepare GitHub tasks
-    if '/' in args.repo:
-        owner, repo = args.repo.split('/', 1)
-        print("\n[STEP 1: Scanning GitHub Issues]")
-        github_tasks = prepare_github_tasks(owner, repo, state)
-        all_tasks.extend(github_tasks)
+        print(f"\n{'=' * 70}")
+        print(f"Repository: {owner}/{repo}")
+        print(f"{'=' * 70}")
 
-    # STEP 2: Prepare Vault tasks
+        # STEP 0: Process missing GitHub Issue TaskHashes (SECTION 3.5)
+        # This MUST run before prepare_github_tasks to ensure all Issues have hashes
+        print(f"\n[STEP 0: Automatic GitHub Issue Processing]")
+        try:
+            processed = process_missing_taskhash_issues(owner, repo, state)
+            # Reload state after processing
+            state = load_state()
+        except subprocess.CalledProcessError as e:
+            print(f"⚠️  Error processing GitHub issues for {owner}/{repo}: {e.stderr}")
+            continue
+
+        # STEP 0.5: Detect changes in existing synced GitHub Issues
+        print(f"\n[STEP 0.5: Detecting Changes in Existing GitHub Issues]")
+        try:
+            existing_updates = detect_existing_issue_updates(owner, repo, state)
+            all_existing_issue_updates.extend(existing_updates)
+            # Reload state after processing
+            state = load_state()
+        except subprocess.CalledProcessError as e:
+            print(f"⚠️  Error detecting issue updates for {owner}/{repo}: {e.stderr}")
+
+        # STEP 1: Prepare GitHub tasks
+        print(f"\n[STEP 1: Scanning GitHub Issues]")
+        try:
+            github_tasks = prepare_github_tasks(owner, repo, state)
+            all_tasks.extend(github_tasks)
+        except subprocess.CalledProcessError as e:
+            print(f"⚠️  Error preparing tasks for {owner}/{repo}: {e.stderr}")
+
+    # STEP 2: Prepare Vault tasks (run once after all repositories processed)
+    print(f"\n{'=' * 70}")
+    print("VAULT SYNC")
+    print(f"{'=' * 70}")
     vault_tasks = []
     due_date_updates: List[Dict[str, Any]] = []
     if args.vault_root.exists():
@@ -1159,35 +1228,41 @@ def main():
                 print(f"  ↻ {upd['of_task_name']} → dueDate: {upd['new_due_date']}")
 
     # Save to file for Claude to process
+    print(f"\n{'=' * 70}")
+    print("FINAL SUMMARY")
+    print(f"{'=' * 70}")
+
     with open(PREPARE_FILE, 'w') as f:
         json.dump({
             "tasks": all_tasks,
-            "existing_issue_updates": existing_issue_updates,
+            "existing_issue_updates": all_existing_issue_updates,
             "due_date_updates": due_date_updates,
+            "repositories": repositories,
             "prepared_at": datetime.now().isoformat(),
             "total_count": len(all_tasks),
-            "update_count": len(existing_issue_updates),
+            "update_count": len(all_existing_issue_updates),
             "due_date_update_count": len(due_date_updates),
         }, f, indent=2, ensure_ascii=False)
 
     # Also save existing issue updates to separate file for clarity
-    if existing_issue_updates:
+    if all_existing_issue_updates:
         updates_file = SCRIPT_DIR / "existing_issue_updates.json"
         with open(updates_file, 'w') as f:
             json.dump({
-                "updates": existing_issue_updates,
+                "updates": all_existing_issue_updates,
                 "prepared_at": datetime.now().isoformat(),
-                "total_updates": len(existing_issue_updates)
+                "total_updates": len(all_existing_issue_updates)
             }, f, indent=2, ensure_ascii=False)
         print(f"\n✓ Existing Issue Updates: {updates_file}")
 
     print("\n" + "=" * 70)
+    print(f"✓ Repositories processed: {', '.join(repositories)}")
     print(f"✓ Prepared {len(all_tasks)} new tasks for sync")
-    print(f"✓ Detected {len(existing_issue_updates)} existing Issues with updates")
+    print(f"✓ Detected {len(all_existing_issue_updates)} existing Issues with updates")
     print(f"✓ Detected {len(due_date_updates)} due date change(s) for already-synced tasks")
     print(f"Output: {PREPARE_FILE}")
     print("=" * 70)
-    if existing_issue_updates:
+    if all_existing_issue_updates:
         print("\n⚠️  ACTION REQUIRED: Review existing_issue_updates.json")
         print("   These Issues have been updated and need sync to OmniFocus")
     print("\nNext: Ask Claude to sync tasks to OmniFocus via MCP")
