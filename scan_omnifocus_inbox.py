@@ -55,7 +55,7 @@ import sys
 import subprocess
 from datetime import datetime, date
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Set
 
 # Resolve imports relative to this script's directory
 SCRIPT_DIR = Path(__file__).parent
@@ -128,6 +128,73 @@ def is_github_project_child_task(task_name: str, parent_name: Optional[str], sta
             pass
 
     return False
+
+
+def validate_no_duplicate_hashes(all_tasks: List[Dict]) -> Tuple[bool, List[str]]:
+    """
+    PLAN C - Duplicate Detection: Check if any TaskHash appears multiple times.
+
+    This prevents the same TaskHash (e.g., abc12345) from appearing in
+    multiple OmniFocus locations (Inbox, Project, etc).
+
+    Returns:
+      (is_valid: bool, messages: list of error strings)
+    """
+    from collections import defaultdict as dd_func
+
+    hash_locations = dd_func(list)
+
+    for task in all_tasks:
+        name = task.get("name", "").strip()
+        h = extract_hash(name)
+
+        if h:
+            parent = task.get("parent_name") or "Inbox"
+            task_id = task.get("id", "unknown")
+            hash_locations[h].append({
+                "name": name,
+                "parent": parent,
+                "id": task_id,
+            })
+
+    errors = []
+    for h_val, locs in hash_locations.items():
+        if len(locs) > 1:
+            details = ", ".join(f"{loc['name']} (parent: {loc['parent']})" for loc in locs)
+            errors.append(
+                f"CRITICAL: TaskHash ({h_val}) found {len(locs)} times: {details}"
+            )
+
+    return (len(errors) == 0, errors)
+
+
+def detect_parent_mismatch(all_tasks: List[Dict], state: Dict[str, Any]) -> List[str]:
+    """
+    PLAN C - Parent-aware Duplicate Detection:
+    Check if a task's parent in OmniFocus matches its recorded parent.
+
+    Returns:
+      List of warning messages
+    """
+    warnings = []
+
+    for task in all_tasks:
+        name = task.get("name", "").strip()
+        h = extract_hash(name)
+        current_parent = task.get("parent_name") or "Inbox"
+
+        if h and h in state:
+            entry = state[h]
+
+            if entry.get("task_type") == "vault_task":
+                has_parent_hash = "parent_task_hash" in entry
+                if current_parent != "Inbox" and not has_parent_hash:
+                    warnings.append(
+                        f"Parent mismatch: '{name}' in '{current_parent}' "
+                        f"but sync_state shows Inbox (no parent_task_hash)"
+                    )
+
+    return warnings
 
 
 # ─── Input Loading ────────────────────────────────────────────────────────────
@@ -237,10 +304,21 @@ def detect_new_tasks(inbox_tasks: List[Dict], state: Dict[str, Any]) -> List[Dic
     """
     Filter inbox tasks to only those that need processing:
       - No TaskHash in name (has_hash returns False)
-      - Not yet tracked in sync_state.json as a source_id
+      - Not yet tracked in sync_state.json as a hash or source_id
 
     Returns list of unprocessed tasks.
+
+    PLAN B: Enhanced skip logic for robustness
+      1. Check if name contains TaskHash (explicit check)
+      2. Check if hash extracted from name exists in state (deduplication)
+      3. Skip container tasks (project name == task name)
+      4. Skip GitHub Project children
+      5. Skip already-tracked base names
     """
+    # Build set of existing hashes from sync_state (PLAN C step 1)
+    # This prevents the same TaskHash from appearing in multiple places
+    existing_hashes = set(state.keys())
+
     # Build a set of base task names already tracked in state
     tracked_names = set()
     for entry in state.values():
@@ -250,17 +328,32 @@ def detect_new_tasks(inbox_tasks: List[Dict], state: Dict[str, Any]) -> List[Dic
         if len(parts) >= 3:
             tracked_names.add(parts[-1].strip())
 
+    skipped_summary = {
+        "has_taskhash": 0,
+        "container": 0,
+        "github_project_child": 0,
+        "already_tracked": 0,
+        "duplicate_hash": 0,
+    }
+
     new_tasks = []
     for task in inbox_tasks:
         name = task.get("name", "").strip()
         if not name:
             continue
 
-        # Skip if already has a TaskHash in the name
+        # PLAN B - Step 1: Check if name already has TaskHash appended
+        # This catches tasks that were already synced in previous runs
         if has_hash(name):
+            extracted = extract_hash(name)
+            if extracted in existing_hashes:
+                skipped_summary["duplicate_hash"] += 1
+                continue
+            # If hash exists but not in state, still skip it
+            skipped_summary["has_taskhash"] += 1
             continue
 
-        # Skip Project container tasks (OmniFocus pattern: task name == project name).
+        # PLAN B - Step 2: Skip Project container tasks (OmniFocus pattern: task name == project name).
         # Every OmniFocus Project has an identically-named first child that acts as a
         # container; it must NEVER receive a TaskHash or appear in the Vault Daily Note.
         # Detection: remove_hash(task_name).strip() == remove_hash(parent_name).strip()
@@ -269,20 +362,37 @@ def detect_new_tasks(inbox_tasks: List[Dict], state: Dict[str, Any]) -> List[Dic
             task_clean = remove_hash(name).strip()
             parent_clean = remove_hash(parent_name).strip()
             if task_clean == parent_clean:
+                skipped_summary["container"] += 1
                 continue  # This is a container task, not real work
 
-        # PHASE 1 IMPROVEMENT: Skip GitHub Project child tasks.
+        # PLAN B - Step 3: Skip GitHub Project child tasks.
         # These tasks belong to GitHub Issue Projects and should NOT be added to Vault.
         # They remain in OmniFocus under their Project, managed separately.
         if is_github_project_child_task(name, parent_name, state):
+            skipped_summary["github_project_child"] += 1
             continue  # Skip GitHub Project children
 
-        # Skip if base name is already tracked in state
+        # PLAN B - Step 4: Skip if base name is already tracked in state
         clean_name = remove_hash(name).strip()
         if clean_name in tracked_names:
+            skipped_summary["already_tracked"] += 1
             continue
 
         new_tasks.append(task)
+
+    # PLAN B - Output: Log skipped tasks for transparency
+    if any(skipped_summary.values()):
+        print("Tasks skipped during filtering:")
+        if skipped_summary["duplicate_hash"] > 0:
+            print(f"  ⊘ {skipped_summary['duplicate_hash']} task(s): already has TaskHash in sync_state")
+        if skipped_summary["has_taskhash"] > 0:
+            print(f"  ⊘ {skipped_summary['has_taskhash']} task(s): already has TaskHash appended")
+        if skipped_summary["container"] > 0:
+            print(f"  ⊘ {skipped_summary['container']} task(s): container (project name == task name)")
+        if skipped_summary["github_project_child"] > 0:
+            print(f"  ⊘ {skipped_summary['github_project_child']} task(s): GitHub Issue Project children")
+        if skipped_summary["already_tracked"] > 0:
+            print(f"  ⊘ {skipped_summary['already_tracked']} task(s): already tracked in state")
 
     return new_tasks
 
@@ -901,6 +1011,31 @@ def main() -> int:
         state = load_state()
 
     print(f"Loaded {len(all_tasks)} tasks from OmniFocus (all projects + inbox)")
+
+    # PLAN C: Pre-routing validation checks
+    print("\nValidation checks:")
+
+    # Check 1: No duplicate hashes
+    is_valid, dup_errors = validate_no_duplicate_hashes(all_tasks)
+    if not is_valid:
+        print("✗ DUPLICATE TASKHASH DETECTED:")
+        for err in dup_errors:
+            print(f"  {err}")
+        print("\nAbort: Cannot proceed with duplicate hashes. Manual cleanup required.")
+        return 1
+
+    print("✓ No duplicate TaskHash entries found")
+
+    # Check 2: Parent mismatch detection
+    parent_warnings = detect_parent_mismatch(all_tasks, state)
+    if parent_warnings:
+        print("⚠ Parent mismatch warnings:")
+        for warn in parent_warnings:
+            print(f"  {warn}")
+    else:
+        print("✓ No parent mismatch detected")
+
+    print()
 
     # Detect new (untracked) tasks across all projects
     new_tasks = detect_new_tasks(all_tasks, state)

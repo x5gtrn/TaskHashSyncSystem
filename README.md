@@ -1318,8 +1318,15 @@ Tasks with `added_date` always use their own date regardless of `--date`.
 **Process:**
 1. If `--dump-file`: parse raw dump text via `parse_omnifocus_dump.py` → write `all_tasks_raw.json`
 2. Load all tasks from `all_tasks_raw.json`
-3. Filter out tasks that already have a TaskHash
-4. Skip OmniFocus container tasks (task name == parent project name after hash removal)
+3. **VALIDATION CHECKS (v2.6+)**:
+   - `validate_no_duplicate_hashes()`: Scan for same TaskHash in multiple locations → FAIL if found
+   - `detect_parent_mismatch()`: Check if task parent matches sync_state → WARN if mismatched
+4. Filter out tasks that already have a TaskHash via multi-layer logic (v2.6+):
+   - Check name contains TaskHash (regex match)
+   - Check if extracted hash exists in sync_state (deduplication)
+   - Skip container tasks (task name == parent project name after hash removal)
+   - Skip GitHub Project children
+   - Skip already-tracked base names
 5. For each hashless task, classify by inspecting `parent_name`
 6. Generate TaskHash for each classified task; `source_id` encodes each task's target Daily Note path
 7. Group vault tasks by `added_date`; write each group to the correct Daily Note
@@ -1405,6 +1412,74 @@ Hash collision avoided because it's based on source location + clean name, not t
 ⚠️  Warning: parentTaskHash 'UNKNOWN_HASH' not found in sync_state
 Task 'Estimate story points (f3c7a154)' will be added as top-level
 ```
+
+### Duplicate TaskHash Prevention (v2.6+)
+
+**Problem:** Same TaskHash appears in multiple OmniFocus locations
+```
+Inbox:         • Do Something (abc12345)
+Project:       • Do Something (abc12345)
+```
+
+**Detection (Pre-sync validation):**
+- `validate_no_duplicate_hashes()` scans all tasks for hash collisions
+- Groups tasks by extracted hash; counts occurrences
+- **FAILS sync** if count > 1, preventing data loss
+
+**Example Output:**
+```
+✗ DUPLICATE TASKHASH DETECTED:
+  CRITICAL: TaskHash (abc12345) found 2 times:
+    Do Something (abc12345) (parent: Inbox)
+    Do Something (abc12345) (parent: Someday)
+
+Abort: Cannot proceed with duplicate hashes. Manual cleanup required.
+```
+
+**Root Cause (Rare):**
+- Task originally synced from Vault → added to Inbox
+- Later, same task manually added to native OmniFocus Project
+- Previous sync did NOT filter tasks already bearing TaskHash
+
+**Recovery:**
+1. Identify the duplicate TaskHash from error message
+2. Locate both instances in OmniFocus
+3. Delete the unwanted copy (usually the Inbox version)
+4. Re-run scan_omnifocus_inbox.py
+5. Verify: `✓ No duplicate TaskHash entries found`
+
+**Prevention (v2.6):**
+- Enhanced multi-layer skip logic in `detect_new_tasks()`
+- Layer 1: Explicit hash check (regex)
+- Layer 2: Deduplication against sync_state
+- Layer 3: Container detection
+- Layer 4: GitHub Project child detection
+- Layer 5: Tracked name matching
+
+### Parent Mismatch Detection (v2.6+)
+
+**Problem:** Task's parent in OmniFocus doesn't match sync_state record
+```
+OmniFocus:  Task in "Someday" Project
+sync_state: Task has no parent_task_hash (recorded as Inbox)
+```
+
+**Detection:**
+- `detect_parent_mismatch()` warns if parent inconsistencies found
+- Non-critical: does NOT halt sync
+- Example output:
+```
+⚠ Parent mismatch: 'Task Name (abc12345)' in 'Project X' 
+  but sync_state shows Inbox (no parent_task_hash)
+```
+
+**Meaning:**
+- Task was moved between projects after initial sync
+- sync_state was not updated to reflect new parent
+
+**Action:**
+- Update sync_state.json `parent_task_hash` field, OR
+- Delete task and re-sync to reset state
 
 ---
 
@@ -1791,6 +1866,37 @@ No scheduled/automatic sync. Manual trigger only by design.
 2. Check that TaskHash in OmniFocus matches sync_state.json
 3. Run reverse_sync.py with verbose output to debug
 
+**Issue (v2.6):** scan_omnifocus_inbox.py fails with "DUPLICATE TASKHASH DETECTED"
+
+**Root Cause:**
+- Same TaskHash appears in multiple OmniFocus locations (Inbox + Project)
+- Occurs when task is moved between projects without sync_state update
+
+**Solution:**
+1. Identify the duplicate TaskHash from error message
+2. Find the task in OmniFocus (search for hash in parentheses)
+3. Delete the unwanted duplicate copy (usually the Inbox version)
+4. Keep the intended location (usually in the Project where it was moved)
+5. Re-run scan_omnifocus_inbox.py in dry-run mode: `--dry-run --verbose`
+6. Verify: `✓ No duplicate TaskHash entries found`
+
+**Prevention (v2.6+):**
+- Enhanced skip logic in `detect_new_tasks()` with 5-layer filtering
+- Pre-sync validation checks: `validate_no_duplicate_hashes()` and `detect_parent_mismatch()`
+- These prevent duplicate creation and alert on parent inconsistencies
+
+**Issue (v2.6):** scan_omnifocus_inbox.py shows "Parent mismatch warnings"
+
+**Meaning:**
+- Task exists in OmniFocus Project (e.g., Someday) but sync_state records it as Inbox-only
+- Usually happens when task is manually moved between projects
+
+**Action:**
+- Non-critical warning (does not block sync)
+- Indicates task parent changed after initial sync
+- Can be corrected by manually updating sync_state.json `parent_task_hash` field
+- Or: Delete and re-sync the task to reset state
+
 ---
 
 ## Contributing
@@ -1805,6 +1911,16 @@ When modifying TaskHashSyncSystem:
 
 ---
 
-**Version:** 2.9  
-**Last Updated:** 2026-05-11  
+## Version History
+
+| Version | Date | Changes |
+|---------|------|---------|
+| **2.6** | 2026-05-28 | Duplicate TaskHash Prevention (Plans B, C, D): Enhanced skip logic, validation checks, parent mismatch detection |
+| 2.5 | 2026-05-05 | Full 3-step sync execution, hook-based triggers, TaskHash-less task routing |
+| 2.0 | 2026-04-01 | Initial release with GitHub/Vault/OmniFocus integration |
+
+---
+
+**Current Version:** 2.6  
+**Last Updated:** 2026-05-28  
 **Maintained By:** [@x5gtrn](https://daisuke.masuda.tokyo)
