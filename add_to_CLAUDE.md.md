@@ -570,6 +570,24 @@ When the user says **"sync tasks"** or equivalent command:
 
 2. **Claude executes all sync steps without waiting for confirmation**:
 
+#### PRE-STEP — Detect & Cascade Delete OmniFocus Deleted Tasks (NEW)
+- **Purpose**: Clean sync_state.json before any forward operations
+- **Input**: `omnifocus_dump.txt` (from MCP `dump_database`)
+- **Process**:
+  - Find tasks in `sync_state.json` NOT found in OmniFocus dump
+  - For each deleted task: cascade delete from GitHub Issue, Vault Daily Notes, and sync_state
+  - Result: `sync_state.json` is in clean state for subsequent steps
+- **Why first?**: Ensures all following steps (STEP 1, 2, 3) operate on clean, consistent state
+  - Avoids hash collision risk (deleted entry + new entry with same name)
+  - Simplifies error handling (deletion failure is independent from addition)
+  - Follows database best practice: DELETE before INSERT
+- Run: `python3 detect_deleted_omnifocus_tasks.py --dump-file omnifocus_dump.txt`
+
+**Key Design Principle**: State Integrity First
+- All subsequent steps begin with a clean `sync_state.json`
+- No mixed state (deleted + new + existing) during STEP 1-3
+- Atomic operation order: DELETE → INSERT → UPDATE → SELECT
+
 #### STEP 0.5 — Existing Issue Updates Detection
 - Call: `detect_existing_issue_updates()` in `prepare_sync.py`
 - **Detects changes in already-synced GitHub Issues**:
@@ -599,15 +617,35 @@ When the user says **"sync tasks"** or equivalent command:
 - Call `mcp__omnifocus-local-server__batch_add_items` with the **filtered** batch (absent items only)
 - Update `sync_state.json` with new OmniFocus IDs
 
-#### STEP 2 — Reverse Sync (OmniFocus → Vault/GitHub)
+#### STEP 2 — Reverse Sync (OmniFocus ↔ GitHub/Vault) - ENHANCED (v2.7)
+
+**Two substeps handle bidirectional synchronization**:
+
+##### STEP 2.1 — Reflect OmniFocus Completions to GitHub/Vault
 - Call MCP: `mcp__omnifocus-local-server__filter_tasks` with `completedToday=true`
 - Save result as **`completed_tasks_raw.json`** in the format:
   ```json
   {"completed_tasks": ["Task Name (hash)", "Another Task (hash)"]}
   ```
   *(plain list `[...]` is also accepted)*
-- Run `python3 reverse_sync.py --completed-tasks completed_tasks_raw.json`
+- Run: `python3 reverse_sync.py --completed-tasks completed_tasks_raw.json`
 - Reflects completed tasks back to Vault checkboxes and GitHub Issue checkboxes
+
+##### STEP 2.2 — Sync GitHub Issue Status Changes to OmniFocus (NEW)
+- **Purpose**: Handle cases where GitHub Issue tasks are unchecked/recompleted after initial OmniFocus sync
+- **Input**: `existing_issue_updates.json` (from prepare_sync.py STEP 0.5)
+- **Process**: 
+  - Reads `completion_changes` from `existing_issue_updates.json`
+  - For each task with changed status:
+    - Updates OmniFocus task `completed` property to match GitHub status
+    - Updates `sync_state.json` with new status
+- **Example**: User marks completed OmniFocus task as incomplete in GitHub Issue → next sync unchecks the task in OmniFocus
+- Run: `python3 reverse_sync.py --existing-issue-updates existing_issue_updates.json`
+
+**Why separate substeps?**
+- Ensures GitHub Issue is source of truth for task status
+- Handles stale completions: if user reverts a completion in GitHub, OmniFocus reflects it
+- Prevents "pending reversion" status where OmniFocus and GitHub disagree
 
 #### STEP 3 — All-Tasks Scan (OmniFocus All Tasks → Vault Daily Note / GitHub)
 - Call MCP: `mcp__omnifocus-local-server__dump_database`
@@ -627,8 +665,11 @@ When the user says **"sync tasks"** or equivalent command:
 User: "sync tasks"
 Claude:
   [Hook runs prepare_sync.py automatically]
-  STEP 1: tasks_to_sync.json → OmniFocus (new tasks pushed)
-  STEP 2: OmniFocus completed → Vault/GitHub (checkboxes updated)
+  PRE-STEP: Detect deleted OmniFocus tasks → Cascade delete from GitHub/Vault/sync_state
+           (sync_state.json is now clean)
+  STEP 1: tasks_to_sync.json → OmniFocus (new tasks pushed, starting from clean state)
+  STEP 2.1: OmniFocus completed → Vault/GitHub (checkboxes updated)
+  STEP 2.2: GitHub Issue status changes → OmniFocus (completion state sync)
   STEP 3: OmniFocus all tasks scanned → Vault Daily Note / GitHub (new hashless tasks routed)
   → Reports results to user
 ```
@@ -652,8 +693,14 @@ This ensures **every GitHub Issue has a TaskHash** before any sync occurs. See s
 
 **IMPORTANT**: 
 1. Claude must **first process any GitHub Issues without TaskHash** (automatic)
-2. Then execute all 3 sync steps, regardless of whether `prepare_sync.py` found new tasks
-3. Steps 2 and 3 are always necessary to reflect OmniFocus state
+2. Then execute **PRE-STEP + all 3 sync steps**, regardless of whether `prepare_sync.py` found new tasks:
+   - **PRE-STEP**: Detect and cascade-delete OmniFocus-deleted tasks (cleans sync_state.json)
+   - **STEP 1**: Add new tasks to OmniFocus (starting from clean state)
+   - **STEP 2.1**: Reflect OmniFocus completions to GitHub/Vault
+   - **STEP 2.2**: Sync GitHub Issue status changes to OmniFocus
+   - **STEP 3**: Route new hashless tasks to Vault/GitHub
+3. PRE-STEP ensures all following steps operate on consistent, clean state
+4. All steps are always executed to maintain full sync integrity
 
 ## Workflow
 
@@ -808,6 +855,95 @@ This ensures hash stability even if task metadata changes.
 - **Task type filtering**: Automatically skips Project tasks in Vault sync
 - **Hash deduplication**: `prepare_sync.py` removes existing hashes before recalculating
 
+## GitHub Issue Status Desync Bug Fix (v2.7 - May 30, 2026)
+
+### The Problem
+**Symptom**: GitHub Issue task shown as unchecked `[ ]`, but OmniFocus showed it as completed `[x]`
+
+**Root Cause**: reverse_sync.py was only handling OmniFocus → GitHub completions (when user marks task done in OmniFocus), but NOT handling GitHub → OmniFocus status reversions (when user unchecks a task in GitHub that was previously synced as complete).
+
+**Example Scenario**:
+1. User marks task complete in OmniFocus on 2026-05-27
+2. sync_state.json records: `status: "completed"`
+3. User later edits GitHub Issue, unchecks the task: `- [ ] Task (hash)`
+4. prepare_sync.py detects: `completion_changes: {hash: X, previous_status: completed, new_status: incomplete}`
+5. **BUG**: reverse_sync.py ignored this change → task remained completed in OmniFocus
+
+### The Fix
+**Approach**: Extend reverse_sync.py to handle bidirectional sync via new STEP 2.2
+
+**Changes**:
+1. Added `--existing-issue-updates` parameter to reverse_sync.py
+2. Implemented `process_existing_issue_updates()` function to:
+   - Read `existing_issue_updates.json` from prepare_sync.py
+   - Process `completion_changes` for each GitHub Issue
+   - Update OmniFocus task completion status to match GitHub
+   - Update sync_state.json to reflect new status
+3. Enhanced `update_omnifocus_task_status()` to update OmniFocus tasks via JXA
+4. Split STEP 2 into STEP 2.1 (completed) and STEP 2.2 (status changes)
+
+**Execution** (automatic on next sync):
+```bash
+STEP 2.1: python3 reverse_sync.py --completed-tasks completed_tasks_raw.json
+STEP 2.2: python3 reverse_sync.py --existing-issue-updates existing_issue_updates.json
+```
+
+**Result**: sync_state.json and GitHub Issue become source of truth; OmniFocus automatically updates to match.
+
+### Impact
+- **Fixed**: 4 tasks across Issues #2, #3, #4 that were stuck in stale "completed" state
+- **Prevention**: Future GitHub status changes automatically propagate to OmniFocus
+- **Idempotency**: Safe to run multiple times; existing state is respected
+
+## OmniFocus Deletion Cascade (v2.8 - May 30, 2026) — PRE-STEP
+
+### The Problem
+**Use Case**: User manually deletes a TaskHash-bearing task from OmniFocus (e.g., completed project cleanup)
+
+**Before**: Task remains orphaned in GitHub Issue and Vault Daily Notes
+- **GitHub Issue**: `- [ ] Task (hash)` still exists
+- **Vault Daily Note**: `- [ ] Task (hash)` still exists
+- **sync_state.json**: `hash: {..., status: "open"}` still tracked
+- **Result**: Stale tasks pollute other locations
+
+### The Solution
+**New Script**: `detect_deleted_omnifocus_tasks.py` (PRE-STEP)
+
+**Execution Position**: **FIRST** — Before STEP 1 (State Integrity First principle)
+
+**Process**:
+1. Parse `omnifocus_dump.txt` from OmniFocus
+2. Find tasks in `sync_state.json` NOT present in OmniFocus dump
+3. For each deleted task:
+   - Delete from GitHub Issue (via `update_issue_body.py --remove-task`)
+   - Delete from Vault Daily Notes (regex line removal)
+   - Remove entry from `sync_state.json`
+4. Result: `sync_state.json` is clean and consistent for subsequent steps
+
+**Why PRE-STEP (not STEP 3.5)?**
+- ✅ Cleans state BEFORE any forward operations (STEP 1)
+- ✅ Avoids hash collision risk (no mixed old/new in sync_state)
+- ✅ Simplifies error handling (deletion is independent)
+- ✅ Follows database best practice: DELETE before INSERT/UPDATE
+- ✅ All subsequent steps operate on clean baseline state
+
+### Design
+**Safety**:
+- ✅ Supports `--dry-run` to preview deletions before executing
+- ✅ Verbose logging shows exactly what will be deleted
+- ✅ Uses `update_issue_body.py` (safe atomic operations)
+
+**Execution**:
+```bash
+# Preview what would be deleted
+python3 detect_deleted_omnifocus_tasks.py --dump-file omnifocus_dump.txt --dry-run --verbose
+
+# Actually delete
+python3 detect_deleted_omnifocus_tasks.py --dump-file omnifocus_dump.txt
+```
+
+**Integration**: Automatic as PRE-STEP (first step, after prepare_sync.py)
+
 ## Implemented Features
 
 
@@ -840,6 +976,29 @@ This ensures hash stability even if task metadata changes.
   - All routes ensure TaskHash assignment
 - ✅ **OmniFocus creation date routing** (added_date → target Daily Note, not today)
 
+### ✅ Completed (v2.7 - May 30, 2026)
+- **GitHub Status Desync Fix**: reverse_sync.py now handles bidirectional sync
+  - ✅ STEP 2.2: Sync GitHub Issue status changes to OmniFocus
+  - ✅ Handles task completions/incompletions in GitHub Issues
+  - ✅ Updates sync_state.json to match GitHub source of truth
+  - ✅ Automatic execution when existing_issue_updates.json is present
+- **Enhanced reverse_sync.py**:
+  - ✅ New `--existing-issue-updates` parameter
+  - ✅ `process_existing_issue_updates()` function
+  - ✅ `update_omnifocus_task_status()` via JXA scripting
+  - ✅ Handles tasks not found in OmniFocus (graceful degradation)
+
+### ✅ Completed (v2.8 - May 30, 2026)
+- **OmniFocus Deletion Cascade**: detect_deleted_omnifocus_tasks.py
+  - ✅ PRE-STEP: Detect and cascade-delete OmniFocus-deleted tasks (before STEP 1)
+  - ✅ Cleans sync_state.json before forward operations
+  - ✅ Deletes from GitHub Issues (uses update_issue_body.py)
+  - ✅ Deletes from Vault Daily Notes (regex-based line removal)
+  - ✅ Removes from sync_state.json
+  - ✅ Supports --dry-run for safe preview
+  - ✅ State Integrity First design (clean state for all subsequent steps)
+  - ✅ OmniFocus becomes deletion source of truth
+
 ## Files Location
 
 **Active Runtime Files** (required for sync workflow):
@@ -851,6 +1010,7 @@ x/Scripts/TaskHashSyncSystem/
 ├── sync_to_omnifocus.py         # Forward sync: resolves hashes, outputs precheck + batch (STEP 1)
 ├── reverse_sync.py              # Reverse sync: reflects completions to GitHub/Vault (STEP 2)
 ├── scan_omnifocus_inbox.py      # All-tasks scan: routes hashless tasks → Vault/GitHub (STEP 3)
+├── detect_deleted_omnifocus_tasks.py # Detect & cascade-delete OmniFocus-deleted tasks (PRE-STEP)
 ├── update_issue_body.py         # ⚠️ REQUIRED for ALL GitHub Issue body edits (see Operational Rules)
 ├── sync_state.json              # Sync state tracking (primary key: TaskHash)
 ├── tasks_to_sync.json           # Prepared tasks waiting for sync (output of prepare_sync.py)
