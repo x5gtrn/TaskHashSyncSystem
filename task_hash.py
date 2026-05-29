@@ -12,7 +12,7 @@ Payload format inspired by Git object headers:
 
 import zlib
 import re
-from typing import Tuple
+from typing import Tuple, Optional, Union
 
 
 def compute_hash(source_id: str) -> str:
@@ -100,7 +100,7 @@ def has_hash(task_name: str) -> bool:
     return bool(re.search(pattern, task_name))
 
 
-def extract_hash(task_name: str) -> str | None:
+def extract_hash(task_name: str) -> Optional[str]:
     """
     Extract hash from a task name.
 

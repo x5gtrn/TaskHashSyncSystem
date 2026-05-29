@@ -448,6 +448,171 @@ def update_sync_state_completion(
         save_state(state)
 
 
+def update_omnifocus_task_status(task_name: str, completed: bool, dry_run: bool = False) -> bool:
+    """
+    Update an OmniFocus task's completion status.
+
+    Args:
+        task_name: Task name (should include hash)
+        completed: True to mark as complete, False to mark as incomplete
+        dry_run: If True, don't make changes
+
+    Returns:
+        True if successful, False otherwise
+    """
+    if dry_run:
+        status = "complete" if completed else "incomplete"
+        print(f"  [DRY RUN] Would mark OmniFocus task {status}: {task_name}")
+        return True
+
+    try:
+        # JXA (JavaScript for Automation) to update task status
+        completed_str = "true" if completed else "false"
+        script = f'''
+var app = Application("OmniFocus");
+var doc = app.defaultDocument;
+var taskName = {json.dumps(task_name)};
+var targetCompleted = {completed_str};
+var found = false;
+
+// Search all projects
+var allProjects = doc.projects;
+for (var p = 0; p < allProjects.length; p++) {{
+    var project = allProjects[p];
+    var tasks = project.tasks;
+    for (var t = 0; t < tasks.length; t++) {{
+        var task = tasks[t];
+        if (task.name === taskName) {{
+            task.completed = targetCompleted;
+            found = true;
+            break;
+        }}
+    }}
+    if (found) break;
+}}
+
+// Search inbox if not found
+if (!found) {{
+    var inboxTasks = doc.tasks;
+    for (var i = 0; i < inboxTasks.length; i++) {{
+        var task = inboxTasks[i];
+        if (task.name === taskName) {{
+            task.completed = targetCompleted;
+            found = true;
+            break;
+        }}
+    }}
+}}
+
+found ? "Updated: " + taskName : "Not found: " + taskName;
+'''
+
+        result = subprocess.run(
+            ['osascript', '-l', 'JavaScript', '-e', script],
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode == 0:
+            output = result.stdout.strip()
+            if "Updated:" in output:
+                status = "completed" if completed else "uncompleted"
+                print(f"  ✓ OmniFocus task {status}: {task_name}")
+                return True
+            else:
+                print(f"  ✗ OmniFocus task not found: {task_name}")
+                return False
+        else:
+            print(f"  ✗ Error updating OmniFocus: {result.stderr}")
+            return False
+
+    except Exception as e:
+        print(f"  ✗ Error updating OmniFocus: {e}")
+        return False
+
+
+def process_existing_issue_updates(existing_updates_file: str, state: Dict[str, Any], dry_run: bool = False, verbose: bool = False) -> Tuple[int, int]:
+    """
+    Process completion_changes from existing GitHub Issues.
+
+    Updates OmniFocus task status to match GitHub Issue state.
+
+    Args:
+        existing_updates_file: Path to existing_issue_updates.json
+        state: sync_state.json content
+        dry_run: If True, don't make changes
+        verbose: If True, show detailed information
+
+    Returns:
+        Tuple of (successful_updates, failed_updates)
+    """
+    successful = 0
+    failed = 0
+
+    try:
+        with open(existing_updates_file, 'r', encoding='utf-8') as f:
+            updates_data = json.load(f)
+    except Exception as e:
+        print(f"Error reading existing_issue_updates.json: {e}")
+        return 0, 1
+
+    updates = updates_data.get('updates', [])
+    if not updates:
+        return 0, 0
+
+    for update in updates:
+        completion_changes = update.get('completion_changes', [])
+        if not completion_changes:
+            continue
+
+        issue_num = update.get('issue_num')
+
+        for change in completion_changes:
+            task_hash = change['hash']
+            new_status = change['new_status']  # 'completed' or 'incomplete'
+
+            if task_hash not in state:
+                if verbose:
+                    print(f"\n✗ Task hash {task_hash} not found in sync_state")
+                failed += 1
+                continue
+
+            task_info = state[task_hash]
+            of_task_name = task_info.get('of_task_name', '')
+
+            # Determine what OmniFocus status should be
+            # new_status from GitHub reflects current GitHub state
+            # We need to set OmniFocus to match
+            should_be_completed = (new_status == 'completed')
+
+            if verbose:
+                print(f"\n→ GitHub Issue #{issue_num}: {of_task_name}")
+                print(f"  Status change: {change['previous_status']} → {new_status}")
+                print(f"  OmniFocus: Set to {('completed' if should_be_completed else 'incomplete')}")
+
+            # Update OmniFocus task status
+            of_status = update_omnifocus_task_status(of_task_name, should_be_completed, dry_run)
+
+            # Update sync_state to reflect the change regardless of OmniFocus success
+            # GitHub Issue is source of truth, so we always update sync_state
+            if not dry_run:
+                state[task_hash]['status'] = new_status
+                if new_status == 'completed':
+                    state[task_hash]['completed_at'] = datetime.now().isoformat()
+
+            # Count as successful if sync_state was updated, even if OmniFocus task not found
+            # (task may have been deleted from OmniFocus)
+            if of_status:
+                successful += 1
+            else:
+                # Task not found in OmniFocus, but still mark as synchronized
+                if not dry_run:
+                    print(f"    ℹ️  sync_state updated (OmniFocus task no longer exists)")
+                successful += 1
+
+    return successful, failed
+
+
 def main():
     import argparse
 
@@ -458,6 +623,11 @@ def main():
         '--completed-tasks',
         type=str,
         help='JSON file with completed task names (from OmniFocus MCP)'
+    )
+    parser.add_argument(
+        '--existing-issue-updates',
+        type=str,
+        help='JSON file with GitHub Issue completion changes (from prepare_sync.py)'
     )
     parser.add_argument(
         '--dry-run',
@@ -474,9 +644,32 @@ def main():
 
     state = load_state()
 
-    # Get completed tasks
-    completed_task_names = []
+    # Check if any operation is requested
+    has_operations = args.completed_tasks or args.existing_issue_updates
+
+    if not has_operations:
+        print("No operations requested.")
+        print("Usage:")
+        print("  python3 reverse_sync.py --completed-tasks <file>")
+        print("    Reflect OmniFocus completions to GitHub/Vault")
+        print()
+        print("  python3 reverse_sync.py --existing-issue-updates <file>")
+        print("    Sync GitHub Issue status changes to OmniFocus")
+        print()
+        print("  python3 reverse_sync.py --completed-tasks <file> --existing-issue-updates <file>")
+        print("    Both operations in sequence")
+        return
+
+    total_successful = 0
+    total_failed = 0
+
+    # STEP 2.1: Process completed tasks from OmniFocus
     if args.completed_tasks:
+        print("=" * 70)
+        print("STEP 2.1 — Reflect OmniFocus Completions to GitHub/Vault")
+        print("=" * 70)
+
+        completed_task_names = []
         try:
             with open(args.completed_tasks, 'r') as f:
                 data = json.load(f)
@@ -490,39 +683,50 @@ def main():
                 completed_task_names = data
         except Exception as e:
             print(f"Error reading completed tasks file: {e}")
-            return
-    else:
-        print("No completed tasks provided.")
-        print("Usage: python3 reverse_sync.py --completed-tasks <file>")
-        print("\nNote: Get completed tasks from OmniFocus via MCP filter_tasks")
-        return
+            total_failed += 1
 
-    if not completed_task_names:
-        print("No completed tasks to process")
-        return
+        if completed_task_names:
+            print(f"\nFound {len(completed_task_names)} completed tasks\n")
 
-    print(f"Found {len(completed_task_names)} completed tasks\n")
+            # Find completed tasks in state
+            completed_tasks = find_completed_tasks_in_state(state, completed_task_names)
 
-    # Find completed tasks in state
-    completed_tasks = find_completed_tasks_in_state(state, completed_task_names)
+            if completed_tasks:
+                print(f"Found {len(completed_tasks)} completed synced tasks\n")
+                print("Reflecting completions to GitHub/Vault:")
+                print("─" * 70)
+                successful, failed = reflect_completions(completed_tasks, state, args.dry_run, args.verbose)
+                total_successful += successful
+                total_failed += failed
 
-    if not completed_tasks:
-        print("No synced tasks found in completed tasks")
-        return
+                # Update sync state
+                if not args.dry_run:
+                    update_sync_state_completion(completed_tasks, state)
+            else:
+                print("No synced tasks found in completed tasks")
+        else:
+            print("No completed tasks to process")
 
-    print(f"Found {len(completed_tasks)} completed synced tasks\n")
+    # STEP 2.2: Process existing GitHub Issue updates
+    if args.existing_issue_updates:
+        print("\n" + "=" * 70)
+        print("STEP 2.2 — Sync GitHub Issue Status Changes to OmniFocus")
+        print("=" * 70 + "\n")
 
-    # Reflect completions to sources
-    print("Reflecting completions to GitHub/Vault:")
-    print("─" * 60)
-    successful, failed = reflect_completions(completed_tasks, state, args.dry_run, args.verbose)
+        successful, failed = process_existing_issue_updates(
+            args.existing_issue_updates, state, args.dry_run, args.verbose
+        )
+        total_successful += successful
+        total_failed += failed
 
-    # Update sync state
-    if not args.dry_run:
-        update_sync_state_completion(completed_tasks, state)
+        # Update sync state
+        if not args.dry_run and successful > 0:
+            save_state(state)
 
-    print("\n" + "=" * 60)
-    print(f"Results: {successful} updated, {failed} failed")
+    print("\n" + "=" * 70)
+    print(f"REVERSE SYNC COMPLETE")
+    print("=" * 70)
+    print(f"Results: {total_successful} updated, {total_failed} failed")
     if args.dry_run:
         print("(Dry run - no changes made)")
 
