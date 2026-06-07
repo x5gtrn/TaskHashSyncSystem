@@ -30,9 +30,10 @@ from pathlib import Path
 from datetime import datetime, date
 from typing import Dict, List, Optional, Any
 
-# Import from task_hash
+# Import from task_hash and system improvements
 sys.path.insert(0, str(Path(__file__).parent))
 from task_hash import compute_hash, make_vault_source_id, remove_hash
+from user_alert_system import UserAlertSystem, AlertSeverity
 
 # Constants
 SCRIPT_DIR = Path(__file__).parent
@@ -323,6 +324,9 @@ def main():
     print("EMERGENCY HASH INBOX TASKS - Emergency Cleanup (PHASE 1.2)")
     print("=" * 78)
 
+    # Setup alert system
+    alert_system = UserAlertSystem(log_file=str(SCRIPT_DIR / "emergency_hash_alerts.jsonl"))
+
     # Process tasks
     processed, failed = process_inbox_tasks(dry_run=args.dry_run, verbose=args.verbose)
 
@@ -338,6 +342,16 @@ def main():
     print(f"\n✗ FAILED: {len(failed)}")
     for item in failed:
         print(f"   - {item['name']}: {item['reason']}")
+
+    # Alert on failures
+    if failed and not args.dry_run:
+        alert_system.alert_rename_failures([
+            {
+                'task': item['name'],
+                'expected': f"{item['name']} ({item['hash']})"
+            }
+            for item in failed
+        ])
 
     # Route to Vault
     if processed and not args.dry_run:

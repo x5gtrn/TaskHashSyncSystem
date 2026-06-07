@@ -28,6 +28,10 @@ from datetime import datetime, date
 sys.path.insert(0, str(Path(__file__).parent))
 from task_hash import compute_hash, make_vault_source_id
 from omnifocus_mcp import OmniFocusMCP
+from parse_omnifocus_dump_improved import OmniFocusDumpParser
+from omnifocus_api_resilient import ResilientOmniFocusAPI
+from validate_task_renaming import TaskRenameValidator
+from user_alert_system import UserAlertSystem, AlertSeverity
 
 # Constants
 SCRIPT_DIR = Path(__file__).parent
@@ -58,17 +62,27 @@ def extract_hash(name: str) -> Optional[str]:
 
 def parse_omnifocus_dump(dump_text: str) -> List[Dict[str, Any]]:
     """
-    Parse OmniFocus dump into task list.
+    Parse OmniFocus dump into task list using improved parser.
+
+    Improvements:
+      - Strips trailing whitespace (critical for API matching)
+      - Normalizes Unicode (NFC form)
+      - Detects and reports parsing anomalies
+      - Handles special characters and emoji correctly
 
     Returns: [
       {
-        "name": "Task Name",
+        "name": "Task Name",  # Already cleaned (whitespace stripped, Unicode normalized)
         "hash": "abc12345" or None,
         "location": "Inbox" or "ProjectName",
         "depth": 0 or 1 or 2 (nesting level)
       }
     ]
     """
+    # Use improved parser for better handling
+    parser = OmniFocusDumpParser(verbose=False)
+    parse_result = parser.parse_dump(dump_text)
+
     tasks = []
     lines = dump_text.split('\n')
     current_location = None
@@ -91,7 +105,9 @@ def parse_omnifocus_dump(dump_text: str) -> List[Dict[str, Any]]:
             # Extract task name
             match = re.search(r'- \[.\] (.+)', line)
             if match:
-                task_name = match.group(1).strip()
+                raw_task_name = match.group(1)
+                # CRITICAL: Use parser's cleaned name (strips trailing spaces, normalizes Unicode)
+                task_name = parser.clean_task_name(raw_task_name)
                 hash_val = extract_hash(task_name)
 
                 tasks.append({

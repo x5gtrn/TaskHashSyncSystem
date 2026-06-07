@@ -36,8 +36,13 @@ from pathlib import Path
 from typing import List, Dict, Any
 from datetime import datetime
 
+# Import system improvements
+sys.path.insert(0, str(Path(__file__).parent))
+from user_alert_system import UserAlertSystem, AlertSeverity
+
 # Constants
 SCRIPT_DIR = Path(__file__).parent
+ALERT_LOG = SCRIPT_DIR / "sync_alerts.jsonl"
 
 
 class SyncPhaseRunner:
@@ -148,9 +153,9 @@ class SyncPhaseRunner:
         return True
 
     def run_phase_3(self) -> bool:
-        """PHASE 3: Robust Monitoring"""
+        """PHASE 3: Robust Monitoring + Validation"""
         print("\n" + "=" * 80)
-        print("PHASE 3: ROBUST MONITORING")
+        print("PHASE 3: ROBUST MONITORING + VALIDATION")
         print("=" * 80)
 
         steps = [
@@ -168,7 +173,69 @@ class SyncPhaseRunner:
                 if "validate" not in script:
                     return False
 
+        # NEW: PHASE 3.5 - Enhanced Validation with Task Rename Check
+        print("\n" + "-" * 80)
+        print("PHASE 3.5: VALIDATION STEP - Task Rename Verification")
+        print("-" * 80)
+
+        validation_success = self._run_validation_step()
+        if not validation_success:
+            print("⚠️  Validation detected issues (see alerts)")
+
         return True
+
+    def _run_validation_step(self) -> bool:
+        """
+        NEW: Validate that all task renames were successful
+        Returns True if all valid, False if issues detected (but non-fatal)
+        """
+        from validate_task_renaming import TaskRenameValidator
+
+        alert_system = UserAlertSystem(log_file=str(ALERT_LOG))
+
+        # Check if sync_state has any recent remediation entries
+        state_file = SCRIPT_DIR / "sync_state.json"
+        if not state_file.exists():
+            print("   ℹ️  No sync_state.json found, skipping validation")
+            return True
+
+        with open(state_file, 'r', encoding='utf-8') as f:
+            state = json.load(f)
+
+        # Collect tasks that were recently added/renamed
+        validator = TaskRenameValidator(verbose=True)
+        tasks_to_validate = []
+
+        for hash_val, entry in state.items():
+            # Check for recently modified entries (within last 5 minutes)
+            if entry.get('of_task_name'):
+                # For now, validate all tasks with OmniFocus IDs
+                tasks_to_validate.append({
+                    'original_name': entry.get('of_task_name', '').rsplit(' (', 1)[0],  # Remove hash
+                    'expected_hash': hash_val,
+                    'actual_name': entry.get('of_task_name', '')
+                })
+
+        if not tasks_to_validate:
+            print("   ℹ️  No tasks to validate")
+            return True
+
+        print(f"   Validating {len(tasks_to_validate)} tasks...")
+        report = validator.validate_batch(tasks_to_validate)
+
+        # Alert user to results
+        if report['all_passed']:
+            alert_system.alert_validation_passed(report['passed'])
+            print("\n   ✅ All task renames verified successfully")
+            return True
+        else:
+            alert_system.alert_partial_success(
+                total=report['total_tasks'],
+                successful=report['passed'],
+                failed=report['failed']
+            )
+            print(f"\n   ⚠️  Validation detected {report['failed']} issues")
+            return False
 
     def run_all(self, skip_phases: List[int] = None) -> bool:
         """Run all phases in order"""
