@@ -130,6 +130,39 @@ def is_github_project_child_task(task_name: str, parent_name: Optional[str], sta
     return False
 
 
+def is_taskhashless_project_child(parent_name: Optional[str], state: Dict[str, Any]) -> bool:
+    """
+    Detect if a task is a child of a TaskHash-less Project (e.g., "Later", "Someday").
+
+    TaskHash-less Projects are native OmniFocus Projects without a TaskHash in sync_state.
+    Their children should be synced to Vault Daily Notes.
+
+    Args:
+        parent_name: Name of the parent project (or None for Inbox tasks)
+        state: sync_state.json dictionary
+
+    Returns:
+        True if parent is a TaskHash-less Project, False if parent has a hash or is Inbox
+    """
+    if not parent_name:
+        return False
+
+    # Extract hash from parent name format: "ProjectName (hash)"
+    if "(" in parent_name and parent_name.endswith(")"):
+        try:
+            parent_hash = parent_name.split("(")[-1].rstrip(")")
+            # If parent has a hash and it's in state, it's either a GitHub or tracked Vault project
+            if parent_hash in state:
+                return False  # Parent HAS a hash, not a TaskHash-less project
+        except Exception:
+            pass
+        # Parent name has hash format but hash not in state: not a valid tracked project
+        return False
+
+    # Parent name has no hash format: this is a TaskHash-less Project (e.g., "Later")
+    return True
+
+
 def validate_no_duplicate_hashes(all_tasks: List[Dict]) -> Tuple[bool, List[str]]:
     """
     PLAN C - Duplicate Detection: Check if any TaskHash appears multiple times.
@@ -334,13 +367,28 @@ def detect_new_tasks(inbox_tasks: List[Dict], state: Dict[str, Any]) -> List[Dic
         "github_project_child": 0,
         "already_tracked": 0,
         "duplicate_hash": 0,
+        "taskhashless_project_child_with_hash": 0,  # NEW: Track TaskHash-less Project children with existing hash
     }
 
+    taskhashless_project_children = []  # NEW: Collect TaskHash-less Project children for verification
     new_tasks = []
     for task in inbox_tasks:
         name = task.get("name", "").strip()
         if not name:
             continue
+
+        parent_name = task.get("parent_name", "")
+
+        # NEW: Early detection of TaskHash-less Project children (Later, Someday, etc.)
+        # These should be processed as Vault tasks, same as Inbox tasks.
+        # Collect them for logging/verification BEFORE applying other filters.
+        is_no_hash_project = is_taskhashless_project_child(parent_name, state)
+        if is_no_hash_project:
+            taskhashless_project_children.append({
+                "task": task,
+                "parent_project": parent_name,
+                "has_hash": has_hash(name),
+            })
 
         # PLAN B - Step 1: Check if name already has TaskHash appended
         # This catches tasks that were already synced in previous runs
@@ -350,14 +398,18 @@ def detect_new_tasks(inbox_tasks: List[Dict], state: Dict[str, Any]) -> List[Dic
                 skipped_summary["duplicate_hash"] += 1
                 continue
             # If hash exists but not in state, still skip it
-            skipped_summary["has_taskhash"] += 1
-            continue
+            # EXCEPTION: If it's a TaskHash-less Project child, still track it as synced
+            if not is_no_hash_project:
+                skipped_summary["has_taskhash"] += 1
+                continue
+            else:
+                skipped_summary["taskhashless_project_child_with_hash"] += 1
+                continue
 
         # PLAN B - Step 2: Skip Project container tasks (OmniFocus pattern: task name == project name).
         # Every OmniFocus Project has an identically-named first child that acts as a
         # container; it must NEVER receive a TaskHash or appear in the Vault Daily Note.
         # Detection: remove_hash(task_name).strip() == remove_hash(parent_name).strip()
-        parent_name = task.get("parent_name", "")
         if parent_name:
             task_clean = remove_hash(name).strip()
             parent_clean = remove_hash(parent_name).strip()
@@ -380,9 +432,20 @@ def detect_new_tasks(inbox_tasks: List[Dict], state: Dict[str, Any]) -> List[Dic
 
         new_tasks.append(task)
 
+    # NEW: Log TaskHash-less Project children detection
+    if taskhashless_project_children:
+        print(f"\n📁 TaskHash-less Project children detected ({len(taskhashless_project_children)} total):")
+        for item in taskhashless_project_children:
+            task = item['task']
+            parent = item['parent_project']
+            has_h = item['has_hash']
+            status = "✓ with hash (already synced)" if has_h else "✗ needs hashing"
+            print(f"  • {task.get('name', '?')[:50]}... ({status})")
+            print(f"    Parent: {parent}")
+
     # PLAN B - Output: Log skipped tasks for transparency
     if any(skipped_summary.values()):
-        print("Tasks skipped during filtering:")
+        print("\nTasks skipped during filtering:")
         if skipped_summary["duplicate_hash"] > 0:
             print(f"  ⊘ {skipped_summary['duplicate_hash']} task(s): already has TaskHash in sync_state")
         if skipped_summary["has_taskhash"] > 0:
@@ -391,6 +454,8 @@ def detect_new_tasks(inbox_tasks: List[Dict], state: Dict[str, Any]) -> List[Dic
             print(f"  ⊘ {skipped_summary['container']} task(s): container (project name == task name)")
         if skipped_summary["github_project_child"] > 0:
             print(f"  ⊘ {skipped_summary['github_project_child']} task(s): GitHub Issue Project children")
+        if skipped_summary["taskhashless_project_child_with_hash"] > 0:
+            print(f"  ⊘ {skipped_summary['taskhashless_project_child_with_hash']} task(s): TaskHash-less Project children (already synced)")
         if skipped_summary["already_tracked"] > 0:
             print(f"  ⊘ {skipped_summary['already_tracked']} task(s): already tracked in state")
 
